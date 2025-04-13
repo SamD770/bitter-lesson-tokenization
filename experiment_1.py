@@ -278,8 +278,13 @@ def bitter_tokenizer_training_step(model, batch, optimizer):
     up_gating_log_probs = torch.stack([(1 - up_gate_probs).log() , up_gate_probs.log()], dim=1)
     consistency_loss = F.cross_entropy(up_gating_log_probs, up_gate_samples, reduction="mean")
 
+    # Hacky additional consistency loss: make the downsampling rate match the training gating.
+    down_gate_rate_loss = (model.downsample_rate - down_gate_probs.mean()) **2
+    up_gate_rate_loss = (model.downsample_rate - up_gate_probs.mean()) **2
+    rate_consistency_loss = 5.*(down_gate_rate_loss + up_gate_rate_loss)
+
     # Optimizer step
-    total_loss = ar_loss + gating_loss + consistency_loss
+    total_loss = ar_loss + gating_loss + consistency_loss + rate_consistency_loss
 
     total_loss.backward()
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -294,9 +299,24 @@ def bitter_tokenizer_training_step(model, batch, optimizer):
     }
 
     return out
+
 import psutil
 import gc
 import tracemalloc
+
+def display_gating(tokens_ids, merge_dst):
+    """Display how a SmallBitterLLM merges a sequence. token_ids and merge_dst are tensors of shape (sequence_length,)."""
+    previous_merge_dst = 0
+    for t_id, merge_destinantion in zip(tokens_ids, merge_dst):
+        merge_destinantion = merge_destinantion.item()
+        
+        if merge_destinantion != previous_merge_dst:
+            print(f"|", end="")
+            previous_merge_dst = merge_destinantion
+        
+        t_txt = byte5_tokenizer.decode(t_id)
+        print(f"{t_txt}", end="")
+
 
 def bitter_tokenizer_training_loop(model, train_dataset):
     # TODO: validation dataset
@@ -308,6 +328,10 @@ def bitter_tokenizer_training_loop(model, train_dataset):
         num_workers=4,
         pin_memory=True
     )
+
+    # See how the model merges a sequence.
+    test_string = openwebtext_8k[-1]["text"][:200]
+    test_batch = byte5_tokenizer.encode(test_string, return_tensors="pt", padding=True)
 
     # Initialize model and optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
@@ -332,30 +356,30 @@ def bitter_tokenizer_training_loop(model, train_dataset):
 
         batch_count = 0
         for batch in train_loader:
-            # Memory tracking for each batch
-            if batch_count % 10 == 0:
-                print(f"CPU Memory at batch {batch_count}: {process.memory_info().rss / (1024 * 1024):.2f} MB")
-                current, peak = tracemalloc.get_traced_memory()
-                print(f"Current memory usage: {current / 10**6:.2f} MB; Peak: {peak / 10**6:.2f} MB")
-                
-                # Force garbage collection to see if memory is being properly released
-                gc.collect()
-                print(f"After GC: {process.memory_info().rss / (1024 * 1024):.2f} MB")
 
             batch = batch["text"]
             batch = byte5_tokenizer(batch, return_tensors="pt", padding=True)["input_ids"]
             batch = batch[:, :4096]  # Truncate to maximum length of 4096 to save GPU memory.
             batch = batch.to(device)
-            print(batch.shape)
 
             loss_dict = bitter_tokenizer_training_step(model, batch, optimizer)
             train_losses.append(loss_dict)
 
-            print(f"Batch ar train loss: {loss_dict['ar_loss']}")
-            batch_count += 1
+            # Memory tracking for each batch
+            if batch_count % 10 == 0:
+                # print(f"CPU Memory at batch {batch_count}: {process.memory_info().rss / (1024 * 1024):.2f} MB")
+                # current, peak = tracemalloc.get_traced_memory()
+                # print(f"Current memory usage: {current / 10**6:.2f} MB; Peak: {peak / 10**6:.2f} MB")
+                
+                # # Force garbage collection to see if memory is being properly released
+                # gc.collect()
+                # print(f"After GC: {process.memory_info().rss / (1024 * 1024):.2f} MB")
+                print(f"Batch {batch_count} ar train loss: {loss_dict['ar_loss']}")
+                with torch.no_grad():
+                    out = model(test_batch)
+                display_gating(test_batch[0], out["down_merge_dst"][0])
 
-            if batch_count % 2 == 3:
-                break
+            batch_count += 1
 
         # Print metrics
         print(f"Epoch {epoch+1}/{num_epochs}")
