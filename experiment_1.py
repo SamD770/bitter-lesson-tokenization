@@ -331,7 +331,7 @@ def bitter_tokenizer_training_loop(model, train_dataset):
 
     # See how the model merges a sequence.
     test_string = openwebtext_8k[-1]["text"][:200]
-    test_batch = byte5_tokenizer.encode(test_string, return_tensors="pt", padding=True)
+    test_batch = byte5_tokenizer.encode(test_string, return_tensors="pt", padding=True).to(device)
 
     # Initialize model and optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
