@@ -159,9 +159,6 @@ class MiniBitterLLM(nn.Module):
         # Sample gating binary variables for each token.
         down_gate_logits = self.down_layer_gate(x)
         down_gate_probs = F.sigmoid(down_gate_logits)
-
-        # Re-scale the gate probabilities to control the downsampling rate.
-        down_gate_probs = down_gate_probs * (self.downsample_rate / down_gate_probs.mean())
         down_gate_samples = torch.bernoulli(down_gate_probs)
 
         # Hack: ensure for now that we always gate on the first token:
@@ -195,7 +192,6 @@ class MiniBitterLLM(nn.Module):
         # Apply second gating to the downsampled output, for use in inference and a consistency loss in training.
         up_gate_logits = self.up_layer_gate(y)
         up_gate_probs = F.sigmoid(up_gate_logits)
-        up_gate_probs = up_gate_probs * (self.downsample_rate / up_gate_probs.mean())
 
         # Map residual stream to logits
         logits = self.output_layer(y)
