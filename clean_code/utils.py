@@ -44,3 +44,20 @@ def display_gating(tokens_ids, merge_dst, tokenizer):
         print(t_txt.replace('\n', '\\n'), end="")
 
     print()
+
+
+
+def load_old_model(file_name):
+    my_model = torch.load(file_name, weights_only=False)
+    # TODO
+    # my_model.__class__ = FlexibleBitterLLM
+    # my_model.rotary_emb = Gemma2RotaryEmbedding(my_model.byte_layer_config)
+    my_model.attn_implementation = "eager" # Use eager attention for higher precision.
+
+    my_model = my_model.to(dtype=torch.float32)
+
+    for l in [*my_model.down_layers, *my_model.mid_layers, *my_model.up_layers]:
+        l.self_attn.attn_logit_softcapping = 50.0
+
+    return my_model
+

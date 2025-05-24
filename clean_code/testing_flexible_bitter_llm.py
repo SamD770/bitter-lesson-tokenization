@@ -9,7 +9,7 @@ my_model = FlexibleBitterLLM(
     num_heads=8,
     downsample_rate=0.25,
     sliding_window=64,
-    flash_attn=True
+    flash_attn=False
 ).to("cuda", dtype=torch.bfloat16)
 
 my_model.eval()

@@ -6,40 +6,275 @@ This will allow us to use the same code for both on- and off-policy training (th
 Also: compatible with the new Gemma2 model implementation in transformers.
 """
 
+from copy import deepcopy
+
+import numpy as np
+import pandas as pd
+
 from torch import nn
 import torch
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
 
-from .bitter_llm import LinearGater, AverageTokenDownsampler, DistributeTokenUpsampler, get_gemma2_attention_mask, get_merge_dst, create_gemma2DecoderLayer
-from transformers.models.gemma2.modeling_gemma2 import Gemma2Config, Gemma2RotaryEmbedding
+# TODO: migrate some things from bitter_llm.py to utils.py
+from .utils import display_gpu_memory, display_gating
+from .bitter_llm import LinearGater, AverageTokenDownsampler, DistributeTokenUpsampler, get_merge_dst, create_gemma2DecoderLayer, discounted_rewards_torch
+from .conditional_sequential import SequentiallyDependentRandomGater
+from transformers.models.gemma2.modeling_gemma2 import Gemma2Model, Gemma2Config, Gemma2RotaryEmbedding, HybridCache, StaticCache, Cache
+
+from typing import Optional, Dict, Union, List
+
+class IndependentWrapperGater(nn.Module):
+    def __init__(self, gater: nn.Module):
+        super().__init__()
+        self.gater = gater
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Sample gating binary variables for each token.
+        gate_logits, gate_probs = self.gater(x)
+
+        # Sample from the gate_probs independently for each token.
+        gate_samples = torch.bernoulli(gate_probs)
+
+        return gate_logits, gate_probs, gate_samples
 
 
-def flash_aware_get_attention_mask(attn_implementation, batch_size, max_seq_len, device, dtype):
+class SelectTokenDownsampler(nn.Module):
+    def forward(self, x: torch.Tensor, position_ids: torch.Tensor, gate_samples: torch.Tensor) -> torch.Tensor:
+        """
+        1 2 3 4 5
+        1 0 0 1 1
+        ->
+        1 4 5
+        inputs:
+        x.shape = (batch_size, seq_len, embedding_dim)
+        position_ids.shape = (batch_size, seq_len)
+        gate_samples.shape = (batch_size, seq_len)
+        returns:
+        x_downsampled.shape = (batch_size, n_dst, embedding_dim)
+        position_ids_downsampled.shape = (batch_size, n_dst)
+        """
+
+        batch_size, _, embedding_dim = x.shape
+        down_merge_dst, n_dst = get_merge_dst(gate_samples)
+
+        # Merge the tokens into the next token where the gate is 1.)
+        max_n_dst = n_dst.max().item()
+
+        # In order to gate the last token, we set the last gate sample to 1. (for AverageTokenDownsampler this is done implicitly)
+        gate_samples[:, -1] = torch.ones_like(gate_samples[:, -1])
+
+        # Also merge the position ids.
+        position_ids_downsampled = torch.zeros(batch_size, max_n_dst, dtype=position_ids.dtype).to(x.device)
+        position_ids_downsampled = torch.scatter_reduce(position_ids_downsampled, dim=1, index=down_merge_dst, src=position_ids, reduce="max", include_self=False)
+
+        # Merge the downsampled tokens.
+        # Use the trick: 1 2 3 4 5 * 1 0 0 1 1 = 1 0 0 4 5 which can then be reduced by sum.
+        x = x * gate_samples.unsqueeze(-1)
+        down_merge_dst = down_merge_dst.unsqueeze(-1).expand(-1, -1, embedding_dim)
+        x_downsampled = torch.zeros(batch_size, max_n_dst, embedding_dim, dtype=x.dtype).to(x.device)
+        x_downsampled = torch.scatter_reduce(x_downsampled, dim=1, index=down_merge_dst, src=x, reduce="sum", include_self=False)
+
+        return x_downsampled, position_ids_downsampled, down_merge_dst
+
+
+def get_merge_dst(gate_samples: torch.Tensor) -> torch.Tensor:
+    """
+    Returns (merge_dst, dst_idx) the merge destination for each token in the sequence and the number of unique merge destinations.
+    Input is a tensor of shape (batch_size, sequence_length) with 0 tokens are merged into the next 1 token.
+    mapping:
+    1 0 1 1 0 1 1 0 0 0 1
+    |   | |   | |       |
+    0 1 1 2 3 3 4 5 5 5 5
+    """
+    # "cycle" the gate samples, appending a zero to the beginning of each batch and ignoring the last gate.
+    preceding_gate_samples = torch.cat([torch.zeros_like(gate_samples[:, -1]).unsqueeze(1), gate_samples[:, :-1]], dim=1).to(dtype=torch.long)
+    # Trick: use cumsum to do this in a vectorized way.
+    merge_dst = preceding_gate_samples.cumsum(dim=1)
+    n_dst = merge_dst[:, -1] + 1 # The number of unique merge destinations is the last token's merge destination + 1.
+    return merge_dst, n_dst
+
+
+class AverageTokenDownsampler(nn.Module):
+    def forward(self, x: torch.Tensor, position_ids: torch.Tensor, down_gate_samples: torch.Tensor) -> torch.Tensor:
+        """
+        1 2 3 4 5
+        1 0 0 1 1
+        ->
+        1 3 5
+        inputs:
+        x.shape = (batch_size, seq_len, embedding_dim)
+        position_ids.shape = (batch_size, seq_len)
+        down_gate_samples.shape = (batch_size, seq_len)
+        returns:
+        x_downsampled.shape = (batch_size, n_dst, embedding_dim)
+        position_ids_downsampled.shape = (batch_size, n_dst)
+        """
+        batch_size, _, embedding_dim = x.shape
+        down_merge_dst, n_dst = get_merge_dst(down_gate_samples)
+
+        # Merge the tokens into the next token where the gate is 1.)
+        max_n_dst = n_dst.max().item()
+
+        # Also merge the position ids.
+        position_ids_downsampled = torch.zeros(batch_size, max_n_dst, dtype=position_ids.dtype).to(x.device)
+        position_ids_downsampled = torch.scatter_reduce(position_ids_downsampled, dim=1, index=down_merge_dst, src=position_ids, reduce="mean", include_self=False)
+
+        # Merge the downsampled tokens.
+        down_merge_dst = down_merge_dst.unsqueeze(-1).expand(-1, -1, embedding_dim)
+
+        x_downsampled = torch.zeros(batch_size, max_n_dst, embedding_dim, dtype=x.dtype).to(x.device)
+        x_downsampled = torch.scatter_reduce(x_downsampled, dim=1, index=down_merge_dst, src=x, reduce="mean", include_self=False)
+
+        return x_downsampled, position_ids_downsampled, down_merge_dst
+
+
+class FlexibleCache(Cache):
+    def __init__(
+        self,
+        config,
+        max_batch_size: int,
+        max_cache_len: Optional[int] = None,
+        device: Union[torch.device, str, None] = None,
+        dtype: torch.dtype = torch.float32,
+        layer_device_map: Optional[Dict[int, Union[str, torch.device, int]]] = None,
+    ) -> None:
+        super().__init__()
+        if not hasattr(config, "sliding_window") or config.sliding_window is None:
+            raise ValueError(
+                "Setting `cache_implementation` to 'sliding_window' requires the model config supporting "
+                "sliding window attention, please check if there is a `sliding_window` field in the model "
+                "config and it's not set to None."
+            )
+        self.max_cache_len = max_cache_len
+        self.max_batch_size = max_batch_size
+        # Some model define a custom `head_dim` != config.hidden_size // config.num_attention_heads
+        self.head_dim = (
+            config.head_dim if hasattr(config, "head_dim") else config.hidden_size // config.num_attention_heads
+        )
+
+        self._dtype = dtype
+        self.num_key_value_heads = (
+            config.num_attention_heads if config.num_key_value_heads is None else config.num_key_value_heads
+        )
+
+        # This is the only line we change from the original implementation.
+        self.is_sliding = torch.tensor(
+            [True] * config.n_down_layers + [False] * config.n_mid_layers + [True] * config.n_up_layers, dtype=torch.bool
+        )
+
+        self.key_cache: List[torch.Tensor] = []
+        self.value_cache: List[torch.Tensor] = []
+        global_cache_shape = (self.max_batch_size, self.num_key_value_heads, max_cache_len, self.head_dim)
+        sliding_cache_shape = (
+            self.max_batch_size,
+            self.num_key_value_heads,
+            min(config.sliding_window, max_cache_len),
+            self.head_dim,
+        )
+        device = torch.device(device) if device is not None and isinstance(device, str) else None
+        for i in range(config.num_hidden_layers):
+            if layer_device_map is not None:
+                layer_device = layer_device_map[i]
+            else:
+                layer_device = device
+            # Note: `mark_static_address` is used to tag the cache as an fixed data pointer, preventing cuda graph
+            # breaks when updating the cache.
+            cache_shape = global_cache_shape if not self.is_sliding[i] else sliding_cache_shape
+            new_layer_key_cache = torch.zeros(cache_shape, dtype=self._dtype, device=layer_device)
+            new_layer_value_cache = torch.zeros(cache_shape, dtype=self._dtype, device=layer_device)
+            torch._dynamo.mark_static_address(new_layer_key_cache)
+            torch._dynamo.mark_static_address(new_layer_value_cache)
+            self.key_cache.append(new_layer_key_cache)
+            self.value_cache.append(new_layer_value_cache)
+
+
+    def update(self, *args, **kwargs):
+        return HybridCache.update(self, *args, **kwargs)
+    
+    def _sliding_update(self, *args, **kwargs):
+        return HybridCache._sliding_update(self, *args, **kwargs)
+    
+    def _static_update(self, *args, **kwargs):
+        return HybridCache._static_update(self, *args, **kwargs)
+    
+    def get_max_cache_shape(self) -> Optional[int]:
+        return HybridCache.get_max_cache_shape(self)
+
+    def get_seq_length(self, layer_idx: Optional[int] = 0):
+        return HybridCache.get_seq_length(self, layer_idx)
+
+    def reset(self):
+        return HybridCache.reset(self)
+
+
+# Copied from Gemma2Model, used to create the causal mask.
+@torch.no_grad()
+def _update_causal_mask(
+    attention_mask: torch.Tensor,
+    input_tensor: torch.Tensor,
+    cache_position: torch.Tensor,
+    past_key_values: HybridCache,
+    attn_implementation: str,
+):
+    # Flash Attention currently doesn't support static cache but Gemma2 work only with static cache.
+    # So we will pass in attention mask as is in any case, not only when ther's padding. Then we'll use its shape
+    # to cut out keys/values trailing 0 used in static cache. This workaround should be compile compatible
+    # as it doesn't cause dynamic control issues.
     if attn_implementation == "flash_attention_2":
-        # Flash attention 2 does not need the attention mask to be causal
-        # Source: trust me bro (testing_flash_attn_causality.py)
-        return None, None
-    elif attn_implementation == "eager":
-        # Eager attention needs the attention mask to be causal
-        return get_gemma2_attention_mask(batch_size, max_seq_len, device, dtype)
+        return attention_mask # FlashAttention2 handles the causal mask internally.
+
+    dtype, device = input_tensor.dtype, input_tensor.device
+    sequence_length = input_tensor.shape[1]
+    if isinstance(past_key_values, (HybridCache, StaticCache, FlexibleCache)):
+        target_length = past_key_values.get_max_cache_shape()
     else:
-        raise NotImplementedError(f"Attention implementation {attn_implementation} not implemented")
+        target_length = attention_mask.shape[-1] if attention_mask is not None else input_tensor.shape[1]
+
+    # In case the provided `attention` mask is 2D, we generate a causal mask here (4D).
+    causal_mask = Gemma2Model._prepare_4d_causal_attention_mask_with_cache_position(
+        attention_mask,
+        sequence_length=sequence_length,
+        target_length=target_length,
+        dtype=dtype,
+        device=device,
+        cache_position=cache_position,
+        batch_size=input_tensor.shape[0],
+    )
+    return causal_mask
+
+
+def get_gemma2_attention_mask(input_tensor, cache_position, past_key_value, attn_implementation):
+    
+    if cache_position is None:
+        _, seq_len, _ = input_tensor.shape
+        cache_position = torch.arange(seq_len, dtype=torch.long, device=input_tensor.device)
+
+    attention_mask = _update_causal_mask(
+        attention_mask=None,
+        input_tensor=input_tensor,
+        cache_position=cache_position,
+        past_key_values=past_key_value,
+        attn_implementation=attn_implementation,
+    )
+
+    return cache_position, attention_mask
 
 
 class FlexibleBitterLLM(nn.Module):
     # Use Gemma2DecoderLayer as a drop in replacement for the TransformerEncoderLayer, with RoPE and sliding window pre-implemented.
     # Also uses a causal mask.
-    def __init__(self, vocab_size: int, embedding_dim: int, num_heads: int, downsample_rate: float = 0.25, sliding_window = 64, 
+    def __init__(self, vocab_size: int, embedding_dim: int, num_heads: int, downsample_rate: float = 0.25, sliding_window = 64, down_layer_gate=None,
                  GaterClass=LinearGater, DownSamplerClass=AverageTokenDownsampler, UpsamplerClass=DistributeTokenUpsampler,
-                 n_down_layers=2, n_mid_layers=6, n_up_layers=2, flash_attn=True):
+                 separate_early_output=True, n_down_layers=2, n_mid_layers=6, n_up_layers=2, flash_attn=True):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
 
         head_dim = embedding_dim // num_heads
 
-        self.attn_implementation = "flash_attention_2" if flash_attn else "eager"
-        print(f"using {self.attn_implementation=}")
+        self._attn_implementation = "flash_attention_2" if flash_attn else "eager"
+        print(f"using {self._attn_implementation=}")
 
         self.byte_layer_config = Gemma2Config(
             head_dim=head_dim,
@@ -49,7 +284,7 @@ class FlexibleBitterLLM(nn.Module):
             hidden_size=embedding_dim,
             num_attention_heads=num_heads,
             num_key_value_heads=num_heads,
-            attn_implementation=self.attn_implementation
+            attn_implementation=self._attn_implementation
         )
 
         self.deep_layer_config = Gemma2Config(
@@ -60,25 +295,35 @@ class FlexibleBitterLLM(nn.Module):
             hidden_size=embedding_dim,
             num_attention_heads=num_heads,
             num_key_value_heads=num_heads,
-            attn_implementation=self.attn_implementation
+            attn_implementation=self._attn_implementation
         )
 
         # Layer idx=0 is necessary for the sliding window to be applied.
         self.down_layers = nn.ModuleList([
-            torch.compile(create_gemma2DecoderLayer(self.byte_layer_config, layer_idx=i)) for i in range(n_down_layers)
+            create_gemma2DecoderLayer(self.byte_layer_config, layer_idx=i, compile=False) for i in range(n_down_layers)
         ])
 
         self.mid_layers = nn.ModuleList([
-            torch.compile(create_gemma2DecoderLayer(self.deep_layer_config, layer_idx=i+n_down_layers)) for i in range(n_mid_layers) 
+            create_gemma2DecoderLayer(self.deep_layer_config, layer_idx=i+n_down_layers, compile=False) for i in range(n_mid_layers) 
         ])
 
         self.up_layers = nn.ModuleList([
-            torch.compile(create_gemma2DecoderLayer(self.byte_layer_config, layer_idx=i+n_down_layers+n_mid_layers)) for i in range(n_up_layers)
+            create_gemma2DecoderLayer(self.byte_layer_config, layer_idx=i+n_down_layers+n_mid_layers, compile=False) for i in range(n_up_layers)
         ])
 
         self.output_layer = nn.Linear(embedding_dim, vocab_size)
-        
-        self.down_layer_gate = GaterClass(embedding_dim, downsample_rate)
+
+        self.separate_early_output = separate_early_output
+        if separate_early_output:
+            self.early_output_layer = deepcopy(self.output_layer) # We can try other things here, but I think this is the most straightforward.
+        else:
+            self.early_output_layer = self.output_layer
+
+        if down_layer_gate is None:
+            self.down_layer_gate = IndependentWrapperGater(GaterClass(embedding_dim, downsample_rate))
+        else:
+            self.down_layer_gate = down_layer_gate
+
         self.downsample_rate = downsample_rate
         self.downsampler = DownSamplerClass()
         self.rotary_emb = Gemma2RotaryEmbedding(config=self.byte_layer_config)
@@ -89,11 +334,16 @@ class FlexibleBitterLLM(nn.Module):
             input_ids: torch.Tensor, 
             position_ids: torch.Tensor=None,
             prescribed_down_gate_samples: torch.Tensor=None,
-            down_gate_mask: torch.Tensor=None
+            down_gate_mask: torch.Tensor=None,
+            cache_position: torch.Tensor=None,
+            past_key_value=None,
+            past_gate_samples=None, # TODO: implement
+            use_cache=False
         ) -> torch.Tensor:
         """
         prescribed_down_gate_samples: if provided, use these to gate the down layers.
         down_gate_mask: if provided, use this to mask the down layers.
+        cache_position: if provided, use this to update the KV cache.
         """
 
         batch_size, max_seq_len = input_ids.shape
@@ -105,7 +355,17 @@ class FlexibleBitterLLM(nn.Module):
         
         # Position_ids are used for RoPE
         # cache_position is used for the cache.update() function which retrieves relevant kvs
-        byte_cache_position, byte_attention_mask = flash_aware_get_attention_mask(self.attn_implementation, batch_size, max_seq_len, x.device, x.dtype)
+        byte_cache_position, byte_attention_mask = get_gemma2_attention_mask(
+            input_tensor=x,
+            cache_position=cache_position,
+            past_key_value=past_key_value,
+            attn_implementation=self.attn_implementation
+        )
+
+        # print(f"{byte_cache_position.shape=} {byte_attention_mask.shape=}")
+        # print(f"{byte_cache_position=}")
+        # print(f"{byte_attention_mask=}")
+        # exit()
 
         position_embeddings = self.rotary_emb(x, position_ids)
 
@@ -117,13 +377,15 @@ class FlexibleBitterLLM(nn.Module):
                 attention_mask=byte_attention_mask,
                 position_ids=position_ids,
                 cache_position=byte_cache_position,
+                past_key_value=past_key_value,
+                use_cache=use_cache
             )[0]
 
-        # Sample gating binary variables for each token.
-        down_gate_logits, down_gate_probs = self.down_layer_gate(x)
+        early_logits = self.early_output_layer(x)
+        early_logits = F.log_softmax(early_logits, dim=-1)
 
-        # If no down_gate_samples are provided, sample from the down_gate_probs.
-        model_down_gate_samples = torch.bernoulli(down_gate_probs)
+        # Sample gating binary variables for each token.
+        down_gate_logits, down_gate_probs, model_down_gate_samples = self.down_layer_gate(x)
 
         if prescribed_down_gate_samples is None:
             down_gate_samples = model_down_gate_samples
@@ -141,13 +403,19 @@ class FlexibleBitterLLM(nn.Module):
 
         # Merge the tokens into the next token where the gate is 1.
         down_gate_samples = down_gate_samples.squeeze(-1)
-        down_merge_dst, n_dst = get_merge_dst(down_gate_samples)
-
-        x_downsampled, position_ids_downsampled = self.downsampler(x, position_ids, down_merge_dst, n_dst)
+        x_downsampled, position_ids_downsampled, down_merge_dst = self.downsampler(x, position_ids, down_gate_samples)
         max_n_dst = x_downsampled.shape[1]
 
         # Apply mid layers to merged tokens and compute the deviation
-        downsampled_cache_position, downsampled_attention_mask = flash_aware_get_attention_mask(self.attn_implementation, batch_size, max_n_dst, x.device, x.dtype)
+        downsampled_cache_position, downsampled_attention_mask = get_gemma2_attention_mask(
+            input_tensor=x_downsampled,
+            cache_position=None,
+            past_key_value=past_key_value,
+            attn_implementation=self.attn_implementation
+        )
+
+        # print(f"{downsampled_cache_position.shape=} {downsampled_attention_mask.shape=}")
+        # print(f"{downsampled_cache_position=}")
 
         y_downsampled = x_downsampled
 
@@ -159,6 +427,8 @@ class FlexibleBitterLLM(nn.Module):
                 attention_mask=downsampled_attention_mask,
                 position_ids=position_ids_downsampled,
                 cache_position=downsampled_cache_position,
+                past_key_value=past_key_value,
+                use_cache=use_cache
             )[0]
         
         deviation = y_downsampled - x_downsampled        
@@ -181,6 +451,8 @@ class FlexibleBitterLLM(nn.Module):
                 attention_mask=byte_attention_mask,
                 position_ids=position_ids,
                 cache_position=byte_cache_position,
+                past_key_value=past_key_value,
+                use_cache=use_cache
             )[0]
 
         # Map residual stream to logits
@@ -189,16 +461,229 @@ class FlexibleBitterLLM(nn.Module):
 
         out = {
             "logits": logits,
+            "early_logits": early_logits,
             "down_gate_probs": down_gate_probs.squeeze(-1),
             "down_gate_logits": down_gate_logits.squeeze(-1),
             "model_down_gate_samples": model_down_gate_samples.to(dtype=torch.long),
             "down_gate_samples": down_gate_samples.to(dtype=torch.long),
-            "down_merge_dst": down_merge_dst, 
             "up_merge_dst": up_merge_dst[:, :, 0], # This dimension is repeated.
-            "n_dst": n_dst,
+            "down_merge_dst": down_merge_dst[:, :, 0], # This dimension is repeated.
             "position_ids": position_ids,
-            "key_values": None
+            "past_key_value": past_key_value
         }
 
         return out
     
+    @property
+    def attn_implementation(self):
+        return getattr(self, '_attn_implementation', None)
+    
+    @attn_implementation.setter
+    def attn_implementation(self, attn_implementation: str):
+        self._attn_implementation = attn_implementation
+        print(f"setting {self._attn_implementation=}")
+        # All layers contain references to these config objects:
+        self.byte_layer_config._attn_implementation = attn_implementation
+        self.deep_layer_config._attn_implementation = attn_implementation
+
+
+
+def select_next_token_logits(logits, next_token_ids):
+    current_token_logits = logits[:, :-1]
+    next_token_logits = F.cross_entropy(current_token_logits.transpose(1, 2), next_token_ids, reduction="none") # Transpose as F.cross_entropy wants shape [batch, classes, ...]
+    return next_token_logits
+
+
+def off_policy_flexible_training_step(
+        model, batch, optimizer, learn_gating=True, downsample_rate_target=0.25, consistency_loss_weight=2., discount_rate = 0.9, relative_gating_loss_weight=1., use_off_policy=True, early_output_loss_weight=0.,
+        early_exit_advantage_estimate=False
+    ):
+    batch_size, _ = batch.shape
+
+    optimizer.zero_grad()
+
+    if use_off_policy:
+        # For now: only consider Random gating
+        off_policy_gate_probs = torch.ones_like(batch) * downsample_rate_target
+        prescribed_down_gate_samples = torch.bernoulli(off_policy_gate_probs)
+    else:
+        prescribed_down_gate_samples = None
+
+    out = model(batch, prescribed_down_gate_samples=prescribed_down_gate_samples)
+
+    logits = out["logits"]
+    early_logits = out["early_logits"]
+    down_gate_samples = out["down_gate_samples"]
+
+    on_policy_probs = out["down_gate_probs"]
+    on_policy_logits = out["down_gate_logits"]
+
+    if not use_off_policy:
+        off_policy_gate_probs = on_policy_probs
+
+    # Compute autoregressive loss: log probability of next token. (for an early insertion of the lm head as well as the late lm head)
+    next_token_ids = batch[:, 1:]
+
+    next_token_logits = select_next_token_logits(logits, next_token_ids)
+    early_next_token_logits = select_next_token_logits(early_logits, next_token_ids)
+
+    late_ar_loss = next_token_logits.mean()
+    early_ar_loss = early_next_token_logits.mean()
+
+    ar_loss = (1 - early_output_loss_weight) * late_ar_loss + early_output_loss_weight * early_ar_loss
+
+    true_downsample_rate = on_policy_probs.mean()
+
+    if learn_gating:
+        # Compute gating loss: discounted log probabilities of following token(s).
+        if early_exit_advantage_estimate:
+            rewards = next_token_logits - early_next_token_logits
+        else:
+            rewards = next_token_logits
+
+        rewards_padded = torch.cat([rewards, torch.zeros(batch_size, 1, device=rewards.device)], dim=-1) # Pad the last reward as zero
+        discounted_rewards = discounted_rewards_torch(rewards_padded, discount_rate)
+        discounted_rewards = (discounted_rewards - discounted_rewards.mean(dim=0)) # Simple estimate of the advantage (induction heads cause dependence on the sequence)
+
+        # action 0 = continue, action 1 = gate
+        action_log_probs = torch.stack([torch.zeros_like(on_policy_logits), on_policy_logits], dim=1) # As a sigmoid is equivalent to having one logit as 0.
+        selected_action_log_probs = F.cross_entropy(action_log_probs, down_gate_samples, reduction="none")
+
+        # likelihood_ratios [:, :, 1] gives the likelihood ratio for the action of gating.
+        likelihood_ratios = torch.stack([
+            (1 - on_policy_probs) / (1 - off_policy_gate_probs),
+            on_policy_probs / off_policy_gate_probs
+        ], dim=-1)
+        likelihood_ratios = likelihood_ratios.detach() # Detach as we don't want to backpropagate through this.
+
+        # Get the likelihood ratios for the selected actions for importance sampling.
+        selected_action_likelihood_ratios = likelihood_ratios.gather(dim=-1, index=down_gate_samples.unsqueeze(-1))
+        selected_action_likelihood_ratios = selected_action_likelihood_ratios.squeeze(-1)
+
+        gating_loss = - (selected_action_likelihood_ratios * discounted_rewards * selected_action_log_probs).mean() # Negative as we want to maximise the reward.
+        gating_loss = relative_gating_loss_weight * gating_loss
+
+        # Hacky additional consistency loss: make the downsampling rate match the training gating.
+        down_gate_rate_loss = consistency_loss_weight*(downsample_rate_target - true_downsample_rate) **2
+
+        total_loss = ar_loss + gating_loss + down_gate_rate_loss
+    else:
+        selected_action_log_probs = torch.tensor(0.0)
+        gating_loss = torch.tensor(0.0)
+        down_gate_rate_loss = torch.tensor(0.0) # For logging purposes.
+        total_loss = ar_loss
+
+    # Optimizer step
+    total_loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    optimizer.step()
+
+    out = {
+        "ar_loss": ar_loss.item(),
+        "late_ar_loss": late_ar_loss.item(),
+        "early_ar_loss": early_ar_loss.item(),
+        "gating_loss": gating_loss.item(),
+        "true_downsample_rate": true_downsample_rate.item(),
+        "rate_consistency_loss": down_gate_rate_loss.item(),
+        "total_loss": total_loss.item(),
+        "selected_action_ce": selected_action_log_probs.mean().item()
+    }
+    return out
+
+
+def flexible_training_loop_warm_start(
+        model, train_dataset, tokenizer, learn_gating=True, 
+        num_epochs=1, batch_size=128, batch_limit=None, warm_start_steps=None, max_seq_length=1024, 
+        batch_print_every=10, print_example_gating=True, discount_rate=0.9, relative_gating_loss_weight=1.,
+        downsample_rate_target=0.25, consistency_loss_weight=2., early_output_loss_weight=0., 
+        early_exit_advantage_estimate=False
+    ):
+
+    # Create data loaders
+    # Create distributed sampler and data loader    
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        num_workers=4,
+        pin_memory=True
+    )
+
+    # See how the model merges a sequence.
+    test_string = train_dataset[-1]["text"][:200]
+    test_batch = tokenizer.encode(test_string, return_tensors="pt", padding=True).cuda()
+
+    # Initialize model and optimizer
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    train_losses = []
+
+    bytes_elapsed = 0
+
+    # Training loop
+    for epoch in range(num_epochs):
+        # Training phase
+        model.train()
+        model = model.cuda()
+
+        print(f"Epoch {epoch+1}/{num_epochs}, GPU usage:")
+        display_gpu_memory()
+
+        for batch_count, batch in enumerate(train_loader):
+
+            if warm_start_steps is not None and batch_count < warm_start_steps:
+                use_off_policy = True
+            else:
+                use_off_policy = False
+
+            batch = batch["text"]
+            batch = tokenizer(batch, return_tensors="pt", padding=True)["input_ids"]
+            batch = batch[:, :max_seq_length]  # Truncate to maximum length of 4096 to save GPU memory.
+            batch = batch.cuda()
+            
+
+            loss_dict = off_policy_flexible_training_step(
+                model, batch, optimizer, 
+                learn_gating=learn_gating, 
+                discount_rate=discount_rate, 
+                relative_gating_loss_weight=relative_gating_loss_weight,
+                consistency_loss_weight=consistency_loss_weight,
+                downsample_rate_target=downsample_rate_target,
+                use_off_policy=use_off_policy,
+                early_output_loss_weight=early_output_loss_weight,
+                early_exit_advantage_estimate=early_exit_advantage_estimate
+            )
+
+            bytes_elapsed += batch.numel()
+            loss_dict["bytes_elapsed"] = bytes_elapsed
+
+            train_losses.append(loss_dict)
+
+            # See if this fixes the OOMing issue.
+            optimizer.zero_grad()
+
+            # Memory tracking for each batch
+            if batch_count % batch_print_every == 0:
+                print(f"Batch {batch_count} ar train loss: {loss_dict['ar_loss']} nats/token selected action ce: {loss_dict['selected_action_ce']}")
+                print(f"Consistency loss: {loss_dict['rate_consistency_loss']} gating loss: {loss_dict['gating_loss']}")
+                if print_example_gating:
+                    with torch.no_grad():
+                        out = model(test_batch)
+
+                        gate_samples = out["down_gate_samples"]
+                        merge_dst = out["down_merge_dst"]
+                        true_rate = gate_samples.float().mean().item()
+                        implied_iid_ce = -true_rate * np.log(true_rate) - (1 - true_rate) * np.log(1 - true_rate)
+
+                        print(f"Downsample rate: {true_rate:4f} implied iid ce: {implied_iid_ce:4f}")
+                        display_gating(test_batch[0], merge_dst[0], tokenizer)
+
+            if batch_limit is not None and batch_count > batch_limit:
+                break
+
+        # Print metrics
+        print(f"Epoch {epoch+1}/{num_epochs}")
+        print(f"Train loss: {np.mean([l['total_loss'] for l in train_losses]):.4f}")
+
+
+    train_losses = pd.DataFrame(train_losses)
+
+    return train_losses

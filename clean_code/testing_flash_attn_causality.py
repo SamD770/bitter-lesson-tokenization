@@ -10,12 +10,10 @@ my_model = Gemma2DecoderLayer(my_config, 0).to("cuda", dtype=torch.bfloat16)
 my_rotary_emb = Gemma2RotaryEmbedding(my_config, 0).to("cuda", dtype=torch.bfloat16)
 print(f"{my_model.is_sliding=} {my_model.sliding_window=}")
 
+# TODO: test flash attention with an uneven sequence length (it appears to be broken for this case)
 my_x = torch.randn(32, 1024, my_config.hidden_size).to("cuda", dtype=torch.bfloat16)
 my_position_ids = torch.arange(1024).unsqueeze(0).expand(32, -1).to("cuda")
 my_position_embeddings = my_rotary_emb(my_x, my_position_ids)
-
-# I don't think that this model is causal. We need to find the right way to construct the attention_mask
-# TODO: test that the sliding window is in fact working.
 
 # Enable autograd to test causality
 my_x.requires_grad_(True)

@@ -11,7 +11,10 @@ import torch
 import numpy as np
 import pandas as pd
 
-from torch.utils.data import DataLoader
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 import datasets
 from transformers.models.gemma2.modeling_gemma2 import Gemma2DecoderLayer, Gemma2Config, Gemma2Attention, Gemma2Model
@@ -49,6 +52,7 @@ def parameter_count_string(module):
         return f"{n_params}" 
     
 
+
 class TokenDownsampler(nn.Module):
     def __init__(self, downsample_rate: float):
         super().__init__()
@@ -59,7 +63,6 @@ class TokenUpsampler(nn.Module):
     def __init__(self, upsample_rate: float):
         super().__init__()
         self.upsample_rate = upsample_rate
-
 
 
 def get_merge_dst(gate_samples: torch.Tensor) -> torch.Tensor:
@@ -79,13 +82,13 @@ def get_merge_dst(gate_samples: torch.Tensor) -> torch.Tensor:
     return merge_dst, n_dst
 
 
-class AverageTokenDownsampler(nn.Module):
-    def forward(self, x: torch.Tensor, position_ids: torch.Tensor, down_merge_dst: torch.Tensor, n_dst: torch.Tensor) -> torch.Tensor:
+class AverageTokenDownsampler:
+    def forward(self, x: torch.Tensor, gate_samples: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
         """
-        1 2 3 4 5
-        1 0 0 1 1
+        1 2 3 4 5 6
+        1 0 0 0 1 1
         ->
-        1 3 5
+        1 3.5 6
         inputs:
         x.shape = (batch_size, seq_len, embedding_dim)
         gate_samples.shape = (batch_size, seq_len)
@@ -94,19 +97,21 @@ class AverageTokenDownsampler(nn.Module):
         x_downsampled.shape = (batch_size, n_dst, embedding_dim)
         position_ids_downsampled.shape = (batch_size, n_dst)
         """
-        batch_size, _, embedding_dim = x.shape
+        batch_size, _, _ = x.shape
 
-        # Merge the tokens into the next token where the gate is 1.)
+        # Merge the tokens into the next token where the gate is 1.
+        gate_samples = gate_samples.squeeze(-1)
+        down_merge_dst, n_dst = get_merge_dst(gate_samples)
         max_n_dst = n_dst.max().item()
 
         # Also merge the position ids.
-        position_ids_downsampled = torch.zeros(batch_size, max_n_dst, dtype=position_ids.dtype).to(x.device)
+        position_ids_downsampled = torch.zeros(batch_size, max_n_dst, dtype=x.dtype).to(x.device)
         position_ids_downsampled = torch.scatter_reduce(position_ids_downsampled, dim=1, index=down_merge_dst, src=position_ids, reduce="mean", include_self=False)
 
         # Merge the downsampled tokens.
-        down_merge_dst = down_merge_dst.unsqueeze(-1).expand(-1, -1, embedding_dim)
+        down_merge_dst = down_merge_dst.unsqueeze(-1).expand(-1, -1, self.embedding_dim)
 
-        x_downsampled = torch.zeros(batch_size, max_n_dst, embedding_dim, dtype=x.dtype).to(x.device)
+        x_downsampled = torch.zeros(batch_size, max_n_dst, self.embedding_dim, dtype=x.dtype).to(x.device)
         x_downsampled = torch.scatter_reduce(x_downsampled, dim=1, index=down_merge_dst, src=x, reduce="mean", include_self=False)
 
         return x_downsampled, position_ids_downsampled
@@ -137,6 +142,43 @@ class DistributeTokenUpsampler():
         return x_upsampled
 
 
+def get_gate_indices(gate_samples: torch.Tensor, n_dst_max) -> torch.Tensor:
+    """
+    Returns the indices of the tokens that are gated merged.
+    """
+    # TODO: vectoize this with cumsum
+
+
+class SelectTokenDownsampler():
+    def forward(self, x: torch.Tensor, gate_samples: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
+        """
+        1 2 3 4 5
+        1 0 0 1 1
+        ->
+        1 4 5
+        inputs:
+        x.shape = (batch_size, seq_len, embedding_dim)
+        gate_samples.shape = (batch_size, seq_len)
+        position_ids.shape = (batch_size, seq_len)
+        returns:
+        x_downsampled.shape = (batch_size, n_dst, embedding_dim)
+        position_ids_downsampled.shape = (batch_size, n_dst)
+        """
+
+        batch_size, seq_len, _ = x.shape
+
+        # Merge the tokens into the next token where the gate is 1.
+        gate_samples = gate_samples.squeeze(-1)
+        n_dst = gate_samples.sum(dim=1)
+
+        selected_indices = get_gate_indices(gate_samples, n_dst.max())
+        position_ids_downsampled = position_ids.gather(dim=1, index=selected_indices)
+
+        selected_indices = selected_indices.unsqueeze(-1).expand(-1, -1, x.shape[-1])
+        x_downsampled = x.gather(dim=1, index=selected_indices)
+
+        return x_downsampled, position_ids_downsampled
+
 
 def compute_discounted_rewards(rewards, discount):
     """
@@ -148,7 +190,6 @@ def compute_discounted_rewards(rewards, discount):
     a[0]*y[n] = b[0]*x[n] + b[1]*x[n-1] + ... + b[M]*x[n-M]
                           - a[1]*y[n-1] - ... - a[N]*y[n-N]
     """
-    # This can probably be sped up by using a 1d convolution.
     r = rewards[:, ::-1]
     a = [1, -discount]
     b = [1]
@@ -158,7 +199,6 @@ def compute_discounted_rewards(rewards, discount):
 
 def discounted_rewards_torch(rewards, discount):
     """torch wrapper for compute_discounted_rewards. Warning: does _not_ allow for backprop through the rewards, which is fine for policy gradients."""
-    # This can probably be sped up by using a 1d convolution.
     rewards_device = rewards.device
     rewards = rewards.detach().cpu().numpy()
     discounted_rewards = compute_discounted_rewards(rewards, discount)
@@ -219,12 +259,10 @@ class EquidistantGater(nn.Module):
         return gate_logits, gate_probs
 
 
-def create_gemma2DecoderLayer(config: Gemma2Config, layer_idx: int, compile: bool = False):
+def create_gemma2DecoderLayer(config: Gemma2Config, layer_idx: int):
     # Gemma2Attention.__init__ overrides config.sliding_window with None if layer_idx % 2 == 0.
     # This is a hack to get the sliding window for even layers indices.
     layer = Gemma2DecoderLayer(config, layer_idx)
-    if compile:
-        layer = torch.compile(layer)
     layer.self_attn.sliding_window = config.sliding_window
     layer.is_sliding = config.sliding_window is not None
     return layer
@@ -248,13 +286,11 @@ def get_gemma2_attention_mask(batch_size, seq_len, device, dtype):
     return cache_position, my_attention_mask
 
 
-
 class CausalGemmaMiniBitterLLM(nn.Module):
+    # A mini BitterLLM with 2 down, 4 mid, and 2 up layers. As a vibe check on the idea.
     # Use Gemma2DecoderLayer as a drop in replacement for the TransformerEncoderLayer, with RoPE and sliding window pre-implemented.
     # Also uses a causal mask.
-    def __init__(self, vocab_size: int, embedding_dim: int, num_heads: int, downsample_rate: float = 0.25, sliding_window = 64, 
-                 GaterClass=LinearGater, DownSamplerClass=AverageTokenDownsampler, UpsamplerClass=DistributeTokenUpsampler,
-                 n_down_layers=2, n_mid_layers=6, n_up_layers=2):
+    def __init__(self, vocab_size: int, embedding_dim: int, num_heads: int, downsample_rate: float = 0.25, sliding_window = 64, GaterClass=LinearGater):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
@@ -282,6 +318,12 @@ class CausalGemmaMiniBitterLLM(nn.Module):
         )
 
         print(f"byte_layer_config: {self.byte_layer_config._attn_implementation=}")
+        self.byte_layer_config._attn_implementation = "flash_attention_2"
+        print(f"byte_layer_config: {self.byte_layer_config._attn_implementation=}")
+
+        n_down_layers = 2
+        n_mid_layers = 2
+        n_up_layers = 2
 
         # Layer idx=0 is necessary for the sliding window to be applied.
         self.down_layers = nn.ModuleList([
@@ -300,13 +342,12 @@ class CausalGemmaMiniBitterLLM(nn.Module):
         
         self.down_layer_gate = GaterClass(embedding_dim, downsample_rate)
         self.downsample_rate = downsample_rate
-        self.downsampler = DownSamplerClass()
 
 
     def forward(
             self, 
             input_ids: torch.Tensor, 
-            position_ids: torch.Tensor=None
+            position_ids: torch.Tensor=None        
         ) -> torch.Tensor:
 
         batch_size, max_seq_len = input_ids.shape
@@ -325,25 +366,30 @@ class CausalGemmaMiniBitterLLM(nn.Module):
             x = layer(x, 
                 attention_mask=byte_attention_mask,
                 position_ids=position_ids,
-                cache_position=byte_cache_position
+                cache_position=byte_cache_position,
             )[0]
 
         # Sample gating binary variables for each token.
         down_gate_logits, down_gate_probs = self.down_layer_gate(x)
         down_gate_samples = torch.bernoulli(down_gate_probs)
 
-        # Hack: ensure that we always gate on the first token:
-        # We need to also set the corresponding logits to 100. to avoid the gradient exploding based on this.
+        # Hack: ensure for now that we always gate on the first token:
         down_gate_samples[:, 0] = 1.
-        down_gate_probs = torch.cat([torch.ones(batch_size, 1, 1, dtype=down_gate_probs.dtype).to(down_gate_probs.device), down_gate_probs[:, 1:]], dim=1)
-        down_gate_logits = torch.cat([100*torch.ones(batch_size, 1, 1, dtype=down_gate_logits.dtype).to(down_gate_logits.device), down_gate_logits[:, 1:]], dim=1)
 
         # Merge the tokens into the next token where the gate is 1.
         down_gate_samples = down_gate_samples.squeeze(-1)
         down_merge_dst, n_dst = get_merge_dst(down_gate_samples)
+        max_n_dst = n_dst.max().item()
 
-        x_downsampled, position_ids_downsampled = self.downsampler(x, position_ids, down_merge_dst, n_dst)
-        max_n_dst = x_downsampled.shape[1]
+        # Also merge the position ids.
+        position_ids_downsampled = torch.zeros(batch_size, max_n_dst, dtype=x.dtype).to(x.device)
+        position_ids_downsampled = torch.scatter_reduce(position_ids_downsampled, dim=1, index=down_merge_dst, src=position_ids, reduce="mean", include_self=False)
+
+        # Merge the downsampled tokens.
+        down_merge_dst = down_merge_dst.unsqueeze(-1).expand(-1, -1, self.embedding_dim)
+
+        x_downsampled = torch.zeros(batch_size, max_n_dst, self.embedding_dim, dtype=x.dtype).to(x.device)
+        x_downsampled = torch.scatter_reduce(x_downsampled, dim=1, index=down_merge_dst, src=x, reduce="mean", include_self=False)
 
         # Apply mid layers to merged tokens and compute the deviation
         downsampled_cache_position, downsampled_attention_mask = get_gemma2_attention_mask(batch_size, max_n_dst, x.device, x.dtype)
@@ -355,7 +401,7 @@ class CausalGemmaMiniBitterLLM(nn.Module):
                 y_downsampled, 
                 attention_mask=downsampled_attention_mask,
                 position_ids=position_ids_downsampled,
-                cache_position=downsampled_cache_position
+                cache_position=downsampled_cache_position,
             )[0]
         
         deviation = y_downsampled - x_downsampled        
@@ -376,7 +422,7 @@ class CausalGemmaMiniBitterLLM(nn.Module):
                 y, 
                 attention_mask=byte_attention_mask,
                 position_ids=position_ids,
-                cache_position=byte_cache_position
+                cache_position=byte_cache_position,
             )[0]
 
         # Map residual stream to logits
@@ -388,16 +434,17 @@ class CausalGemmaMiniBitterLLM(nn.Module):
             "down_gate_probs": down_gate_probs.squeeze(-1),
             "down_gate_logits": down_gate_logits.squeeze(-1),
             "down_gate_samples": down_gate_samples.to(dtype=torch.long),
-            "down_merge_dst": down_merge_dst, 
-            "up_merge_dst": up_merge_dst[:, :, 0], # This dimension is repeated.
+            "down_merge_dst": down_merge_dst[:, :, 0], # This dimension is repeated.
+            "up_merge_dst": up_merge_dst[:, :, 0],
             "n_dst": n_dst,
-            "position_ids": position_ids
+            "position_ids": position_ids,
+            "key_values": None
         }
 
         return out
     
 
-def bitter_tokenizer_training_step(model, batch, optimizer, learn_gating=True, downsample_rate_target=0.25, consistency_loss_weight=2., discount_rate = 0.9, relative_gating_loss_weight=1.):
+def bitter_tokenizer_training_step(model, batch, optimizer, learn_gating=True):
     """
     Assume that batch is torch.tensor of token ids of shape (batch, sequence_length). returns a dict of floats of the training losses for the batch.
     """
@@ -420,6 +467,7 @@ def bitter_tokenizer_training_step(model, batch, optimizer, learn_gating=True, d
 
     if learn_gating:
         # Compute gating loss: discounted log probabilities of following token(s).
+        discount_rate = 0.9
         next_token_logits_padded = torch.cat([next_token_logits, torch.zeros(batch_size, 1, device=next_token_logits.device)], dim=-1) # Pad the last reward as zero
         discounted_rewards = discounted_rewards_torch(next_token_logits_padded, discount_rate)
         discounted_rewards = (discounted_rewards - discounted_rewards.mean(dim=0)) # Simple estimate of the advantage
@@ -428,9 +476,9 @@ def bitter_tokenizer_training_step(model, batch, optimizer, learn_gating=True, d
         action_log_probs = torch.stack([torch.zeros_like(down_gate_logits), down_gate_logits], dim=1) # As a sigmoid is equivalent to having one logit as 0.
         selected_action_log_probs = F.cross_entropy(action_log_probs, down_gate_samples, reduction="none")
         gating_loss = - (discounted_rewards * selected_action_log_probs).mean() # Negative as we want to maximise the reward.
-        gating_loss = relative_gating_loss_weight * gating_loss
+
         # Hacky additional consistency loss: make the downsampling rate match the training gating.
-        down_gate_rate_loss = consistency_loss_weight*(downsample_rate_target - true_downsample_rate) **2
+        down_gate_rate_loss =  4.*(model.downsample_rate - true_downsample_rate) **2
 
         total_loss = ar_loss + gating_loss + down_gate_rate_loss
     else:
@@ -454,108 +502,3 @@ def bitter_tokenizer_training_step(model, batch, optimizer, learn_gating=True, d
     }
 
     return out
-
-
-def display_gating(tokens_ids, merge_dst, tokenizer):
-    """Display how a SmallBitterLLM merges a sequence. token_ids and merge_dst are tensors of shape (sequence_length,)."""
-    previous_merge_dst = 0
-    for t_id, merge_destinantion in zip(tokens_ids, merge_dst):
-        merge_destinantion = merge_destinantion.item()
-        
-        if merge_destinantion != previous_merge_dst:
-            print(f"|", end="")
-            previous_merge_dst = merge_destinantion
-        
-        t_txt = tokenizer.decode(t_id)
-        print(t_txt.replace('\n', '\\n'), end="")
-
-    print()
-
-
-def bitter_tokenizer_training_loop(model, train_dataset, tokenizer, learn_gating=True, 
-                                   num_epochs=1, batch_size=128, batch_limit=None, max_seq_length=1024, 
-                                   batch_print_every=10, print_example_gating=True, discount_rate=0.9, relative_gating_loss_weight=1.,
-                                   downsample_rate_target=0.25, consistency_loss_weight=2.):
-
-    # Create data loaders
-    # Create distributed sampler and data loader    
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        num_workers=4,
-        pin_memory=True
-    )
-
-    # See how the model merges a sequence.
-    test_string = train_dataset[-1]["text"][:200]
-    test_batch = tokenizer.encode(test_string, return_tensors="pt", padding=True).cuda()
-
-    # Initialize model and optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-    train_losses = []
-
-    # Training loop
-    for epoch in range(num_epochs):
-        # Training phase
-        model.train()
-        model = model.cuda()
-
-        print(f"Epoch {epoch+1}/{num_epochs}, GPU usage:")
-        display_gpu_memory()
-
-        for batch_count, batch in enumerate(train_loader):
-
-            batch = batch["text"]
-            batch = tokenizer(batch, return_tensors="pt", padding=True)["input_ids"]
-            batch = batch[:, :max_seq_length]  # Truncate to maximum length of 4096 to save GPU memory.
-            batch = batch.cuda()
-
-            loss_dict = bitter_tokenizer_training_step(
-                model, batch, optimizer, 
-                learn_gating=learn_gating, 
-                discount_rate=discount_rate, 
-                relative_gating_loss_weight=relative_gating_loss_weight,
-                consistency_loss_weight=consistency_loss_weight,
-                downsample_rate_target=downsample_rate_target
-            )
-            train_losses.append(loss_dict)
-
-            # See if this fixes the OOMing issue.
-            optimizer.zero_grad()
-
-            # Memory tracking for each batch
-            if batch_count % batch_print_every == 0:
-                print(f"Batch {batch_count} ar train loss: {loss_dict['ar_loss']} nats/token selected action ce: {loss_dict['selected_action_ce']}")
-                if print_example_gating:
-                    with torch.no_grad():
-                        out = model(test_batch)
-
-                        gate_samples = out["down_gate_samples"]
-                        merge_dst = out["down_merge_dst"]
-                        true_rate = gate_samples.float().mean().item()
-                        implied_iid_ce = -true_rate * np.log(true_rate) - (1 - true_rate) * np.log(1 - true_rate)
-
-                        print(f"Downsample rate: {true_rate:4f} implied iid ce: {implied_iid_ce:4f}")
-                        display_gating(test_batch[0], merge_dst[0], tokenizer)
-
-            if batch_limit is not None and batch_count > batch_limit:
-                break
-
-        # Print metrics
-        print(f"Epoch {epoch+1}/{num_epochs}")
-        print(f"Train loss: {np.mean([l['total_loss'] for l in train_losses]):.4f}")
-    
-    train_losses = pd.DataFrame(train_losses)
-
-    return train_losses
-
-
-def set_seed(seed):
-    """Set random seed for reproducibility"""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
