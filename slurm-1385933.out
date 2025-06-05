@@ -1,0 +1,10 @@
+/scratch/slurm/spool/job1385933/slurm_script: /home/sdauncey/.local/bin/accelerate: /opt/conda/bin/python3.11: bad interpreter: No such file or directory
+tar (child): /itet-stor/sdauncey/net_scratch/VScodeProjects/bitter-lesson-tokenization/experiment_33/logs/wandb_1385933.tar.gz: Cannot open: No such file or directory
+tar (child): Error is not recoverable: exiting now
+tar: Child returned status 2
+tar: Error is not recoverable: exiting now
+tar (child): /itet-stor/sdauncey/net_scratch/VScodeProjects/bitter-lesson-tokenization/experiment_33/logs/wandb_1385933.tar.gz: Cannot open: No such file or directory
+tar (child): Error is not recoverable: exiting now
+tar: Child returned status 2
+tar: Error is not recoverable: exiting now
+/scratch/slurm/spool/job1385933/slurm_script: /home/sdauncey/.local/bin/wandb: /opt/conda/bin/python3.11: bad interpreter: No such file or directory

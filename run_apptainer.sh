@@ -1,0 +1,2 @@
+apptainer shell --nv --bind /itet-stor/sdauncey/net_scratch:/itet-stor/sdauncey/net_scratch,/scratch/sdauncey:/scratch/sdauncey /scratch/sdauncey/sams_favorite_build.sif
+# TODO: install matplotlib and jupyterrep

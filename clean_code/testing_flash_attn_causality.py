@@ -6,13 +6,13 @@ import torch
 
 my_config = Gemma2Config(attn_implementation="flash_attention_2", sliding_window=64)
 print(f"{my_config._attn_implementation=}")
-my_model = Gemma2DecoderLayer(my_config, 0).to("cuda", dtype=torch.bfloat16)
-my_rotary_emb = Gemma2RotaryEmbedding(my_config, 0).to("cuda", dtype=torch.bfloat16)
+my_model = Gemma2DecoderLayer(my_config, 0).to("cuda", dtype=torch.float16)
+my_rotary_emb = Gemma2RotaryEmbedding(my_config, 0).to("cuda", dtype=torch.float16)
 print(f"{my_model.is_sliding=} {my_model.sliding_window=}")
 
 # TODO: test flash attention with an uneven sequence length (it appears to be broken for this case)
-my_x = torch.randn(32, 1024, my_config.hidden_size).to("cuda", dtype=torch.bfloat16)
-my_position_ids = torch.arange(1024).unsqueeze(0).expand(32, -1).to("cuda")
+my_x = torch.randn(32, 1033, my_config.hidden_size).to("cuda", dtype=torch.float16)
+my_position_ids = torch.arange(1033).unsqueeze(0).expand(32, -1).to("cuda")
 my_position_embeddings = my_rotary_emb(my_x, my_position_ids)
 
 # Enable autograd to test causality
