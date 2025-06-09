@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 
 # TODO: migrate some things from bitter_llm.py to utils.py
 from .utils import display_gpu_memory, display_gating
-from .bitter_llm import LinearGater, RandomGater, EquidistantGater, AverageTokenDownsampler, DistributeTokenUpsampler, get_merge_dst, create_gemma2DecoderLayer, discounted_rewards_torch
+from .bitter_llm import LinearGater, RandomGater, EquidistantGater, AverageTokenDownsampler, get_merge_dst, create_gemma2DecoderLayer, discounted_rewards_torch
 from .conditional_sequential import SequentiallyDependentRandomGater
 from transformers.models.gemma2.modeling_gemma2 import Gemma2Model, Gemma2Config, Gemma2RotaryEmbedding, HybridCache, StaticCache, Cache
 
@@ -59,6 +59,11 @@ class ExactRandomGater(nn.Module):
 
         # Generate random values for each position
         latents = torch.rand(batch_size, seq_len, 1, device=x.device)
+
+        # Set the first and last tokens to infinity to ensure it is selected.
+        # latents[:, 0] = torch.tensor(float('inf'), dtype=latents.dtype, device=x.device)
+        # latents[:, -1] = torch.tensor(float('inf'), dtype=latents.dtype, device=x.device)
+
         # Use topk to find the indices of the k largest values
         # This gives us exactly num_ones indices per batch
         _, top_indices = torch.topk(latents, k=num_ones, dim=1)
@@ -73,6 +78,7 @@ class ExactRandomGater(nn.Module):
 class SelectTokenDownsampler(nn.Module):
     def forward(self, x: torch.Tensor, position_ids: torch.Tensor, gate_samples: torch.Tensor) -> torch.Tensor:
         """
+        Selects the tokens where the gate is 1. accordnig to:
         1 2 3 4 5
         1 0 0 1 1
         ->
@@ -107,6 +113,42 @@ class SelectTokenDownsampler(nn.Module):
         x_downsampled = torch.scatter_reduce(x_downsampled, dim=1, index=down_merge_dst, src=x, reduce="sum", include_self=False)
 
         return x_downsampled, position_ids_downsampled, down_merge_dst
+
+
+class DistributeTokenUpsampler(nn.Module):
+    def forward(self, x: torch.Tensor, gate_samples: torch.Tensor) -> torch.Tensor:
+        """
+        Distributes the values of x to the next token where the gate is 1.
+        1 2 3
+        1 0 0 1 1
+        ->
+        1 1 1 2 3
+        """
+        batch_size, _, embedding_dim = x.shape
+        # Upsample by removing the first token merge group, shifting all token groups down and adding another one token group at the end.
+        up_gate_samples = gate_samples[:, 1:]
+        up_gate_samples = torch.cat([up_gate_samples, torch.ones(batch_size, 1, dtype=up_gate_samples.dtype).to(up_gate_samples.device)], dim=1)
+        up_merge_dst, _ = get_merge_dst(up_gate_samples)
+        up_merge_dst = up_merge_dst.unsqueeze(-1).expand(-1, -1, embedding_dim)
+
+        x_upsampled = torch.gather(x, dim=1, index=up_merge_dst)
+
+        return x_upsampled, up_merge_dst
+
+
+def gate_first_and_last_tokens(gate_samples: torch.Tensor, gate_probs: torch.Tensor, gate_logits: torch.Tensor) -> torch.Tensor:
+    """
+    Manually sets the first and last gate samples of the sequence to 1. Appropriately adjusts the gate_probs and gate_logits and detaches these parts from the computation graph.
+    This is in theory unnecessary, but in practice it makes up/downsampling easier to implement.
+    """
+    batch_size, _, _ = gate_samples.shape
+    gate_samples[:, 0] = 1.
+    gate_samples[:, -1] = 1.
+    ones = torch.ones(batch_size, 1, 1, dtype=gate_probs.dtype).to(gate_probs.device)
+    # We need to also set the corresponding logits to 100. to avoid the gradient exploding based on this.
+    gate_probs = torch.cat([ones, gate_probs[:, 1:-1], ones], dim=1)
+    gate_logits = torch.cat([100*ones, gate_logits[:, 1:-1], 100*ones], dim=1)
+    return gate_samples, gate_probs, gate_logits
 
 
 def get_merge_dst(gate_samples: torch.Tensor) -> torch.Tensor:
@@ -360,6 +402,7 @@ class FlexibleBitterLLM(nn.Module):
 
         self.downsample_rate = downsample_rate
         self.downsampler = DownSamplerClass()
+        self.upsampler = UpsamplerClass()
         self.rotary_emb = Gemma2RotaryEmbedding(config=self.byte_layer_config)
 
 
@@ -380,9 +423,50 @@ class FlexibleBitterLLM(nn.Module):
         cache_position: if provided, use this to update the KV cache.
         """
 
-        batch_size, max_seq_len = input_ids.shape
 
         x = self.embedding(input_ids)
+
+        y, x_early_exit, out = self.forward_backbone(
+            x, 
+            position_ids,
+            prescribed_down_gate_samples,
+            down_gate_mask,
+            cache_position,
+            past_key_value,
+            past_gate_samples,
+            use_cache
+        )
+
+        early_logits = self.early_output_layer(x_early_exit)
+        early_logits = F.log_softmax(early_logits, dim=-1)
+
+        # Map residual stream to logits
+        logits = self.output_layer(y)
+        logits = F.log_softmax(logits, dim=-1)
+
+        out.update({
+            "logits": logits,
+            "early_logits": early_logits
+        })
+
+        return out
+
+
+    def forward_backbone(
+            self,
+            x,
+            position_ids: torch.Tensor=None,
+            prescribed_down_gate_samples: torch.Tensor=None,
+            down_gate_mask: torch.Tensor=None,
+            cache_position: torch.Tensor=None,
+            past_key_value=None,
+            past_gate_samples=None, # TODO: implement
+            use_cache=False
+        ) -> torch.Tensor:
+        """
+        Maps embeddings through the residual stream.
+        """
+        batch_size, max_seq_len, _ = x.shape
 
         if position_ids is None:
             position_ids = torch.arange(max_seq_len, dtype=x.dtype).unsqueeze(0).expand(batch_size, -1).to(x.device)      
@@ -410,8 +494,8 @@ class FlexibleBitterLLM(nn.Module):
                 use_cache=use_cache
             )[0]
 
-        early_logits = self.early_output_layer(x)
-        early_logits = F.log_softmax(early_logits, dim=-1)
+        # Save x for computing the early exit logits.
+        x_early_exit = x
 
         # Sample gating binary variables for each token.
         down_gate_logits, down_gate_probs, model_down_gate_samples = self.down_layer_gate(x)
@@ -462,14 +546,8 @@ class FlexibleBitterLLM(nn.Module):
         
         deviation = y_downsampled - x_downsampled        
 
-        # Upsample by removing the first token merge group, shifting all token groups down and adding another one token group at the end.
-        up_gate_samples = down_gate_samples[:, 1:]
-        up_gate_samples = torch.cat([up_gate_samples, torch.ones(batch_size, 1, dtype=up_gate_samples.dtype).to(up_gate_samples.device)], dim=1)
-        up_merge_dst, _ = get_merge_dst(up_gate_samples)
-        up_merge_dst = up_merge_dst.unsqueeze(-1).expand(-1, -1, self.embedding_dim)
-
         # Add the upsampled deviation to the input to the middle layers
-        upsampled_deviation = torch.gather(deviation, dim=1, index=up_merge_dst)
+        upsampled_deviation, up_merge_dst = self.upsampler(deviation, down_gate_samples)
         y = x + upsampled_deviation
 
         # Apply up layers to byte tokens
@@ -484,13 +562,8 @@ class FlexibleBitterLLM(nn.Module):
                 use_cache=use_cache
             )[0]
 
-        # Map residual stream to logits
-        logits = self.output_layer(y)
-        logits = F.log_softmax(logits, dim=-1)
 
         out = {
-            "logits": logits,
-            "early_logits": early_logits,
             "down_gate_probs": down_gate_probs.squeeze(-1),
             "down_gate_logits": down_gate_logits.squeeze(-1),
             "model_down_gate_samples": model_down_gate_samples.to(dtype=torch.long),
@@ -501,8 +574,9 @@ class FlexibleBitterLLM(nn.Module):
             "past_key_value": past_key_value
         }
 
-        return out
-    
+        return y, x_early_exit, out
+
+
     @property
     def attn_implementation(self):
         return getattr(self, '_attn_implementation', None)

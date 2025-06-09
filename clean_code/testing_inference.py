@@ -3,7 +3,7 @@ import torch
 from transformers import AutoTokenizer
 from transformers.models.gemma2.modeling_gemma2 import HybridCache, Cache
 
-from clean_code.flexible_bitter_llm import IndependentWrapperGater, FlexibleBitterLLM, FlexibleCache
+from clean_code.flexible_bitter_llm import IndependentWrapperGater, FlexibleBitterLLM, FlexibleCache, DistributeTokenUpsampler
 
 
 @torch.no_grad()
@@ -96,6 +96,7 @@ if __name__ == "__main__":
     saved_model_file_name = f"training_random_base_model/random_select_early_output_base_model_42.pt"
     my_model = torch.load(os.path.join(net_scratch_dir, saved_model_file_name), weights_only=False).to(device)
     my_model.down_layer_gate = IndependentWrapperGater(my_model.down_layer_gate)
+    my_model.upsampler = DistributeTokenUpsampler()
 
     # my_model = FlexibleBitterLLM(
     #     vocab_size=byte5_tokenizer.vocab_size, 
