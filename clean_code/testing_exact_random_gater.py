@@ -1,6 +1,6 @@
 import torch
 
-from clean_code.flexible_bitter_llm import ExactRandomGater, get_merge_dst, SelectTokenDownsampler
+from clean_code.flexible_bitter_llm import ExactRandomGater, get_merge_dst, SelectTokenDownsampler, gate_first_and_last_tokens
 
 gater = ExactRandomGater(embedding_dim=768, downsample_rate=0.25)
 downsampler = SelectTokenDownsampler()
@@ -18,9 +18,7 @@ gate_logits, gate_probs, gate_samples = gater(x)
 print(f"{gate_samples.shape=} {gate_samples[:, 0, 0]=}")
 print(f"{gate_samples.sum(dim=1)[:, 0]=}    {gate_samples.sum()=}")
 
-gate_samples[:, 0] = 1.
-gate_probs = torch.cat([torch.ones(batch_size, 1, 1, dtype=gate_probs.dtype).to(gate_probs.device), gate_probs[:, 1:]], dim=1)
-gate_logits = torch.cat([100*torch.ones(batch_size, 1, 1, dtype=gate_logits.dtype).to(gate_logits.device), gate_logits[:, 1:]], dim=1)
+gate_samples, gate_probs, gate_logits = gate_first_and_last_tokens(gate_samples, gate_probs, gate_logits)
 
 gate_samples = gate_samples.squeeze(-1)
 

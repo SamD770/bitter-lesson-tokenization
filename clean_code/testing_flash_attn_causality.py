@@ -1,4 +1,4 @@
-from .flexible_bitter_llm import FlexibleBitterLLM
+from .flexible_bitter_llm import FlexibleBitterLLM, ExactRandomGater
 from .bitter_llm import get_gemma2_attention_mask
 from transformers.models.gemma2.modeling_gemma2 import Gemma2Config, Gemma2DecoderLayer, Gemma2Attention, Gemma2RotaryEmbedding
 import torch
@@ -78,7 +78,8 @@ if __name__ == "__main__":
         num_heads=8, 
         downsample_rate=0.25, 
         sliding_window=64,
-        flash_attn=True
+        flash_attn=True,
+        down_layer_gate=ExactRandomGater(embedding_dim=512, downsample_rate=0.25)
     ).to(device="cuda", dtype=dtype)
 
     my_x = torch.randn(32, 1033, 512).to("cuda", dtype=dtype)

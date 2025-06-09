@@ -61,8 +61,8 @@ class ExactRandomGater(nn.Module):
         latents = torch.rand(batch_size, seq_len, 1, device=x.device)
 
         # Set the first and last tokens to infinity to ensure it is selected.
-        # latents[:, 0] = torch.tensor(float('inf'), dtype=latents.dtype, device=x.device)
-        # latents[:, -1] = torch.tensor(float('inf'), dtype=latents.dtype, device=x.device)
+        latents[:, 0] = torch.tensor(float('inf'), dtype=latents.dtype, device=x.device)
+        latents[:, -1] = torch.tensor(float('inf'), dtype=latents.dtype, device=x.device)
 
         # Use topk to find the indices of the k largest values
         # This gives us exactly num_ones indices per batch
@@ -97,9 +97,6 @@ class SelectTokenDownsampler(nn.Module):
 
         # Merge the tokens into the next token where the gate is 1.)
         max_n_dst = n_dst.max().item()
-
-        # In order to gate the last token, we set the last gate sample to 1. (for AverageTokenDownsampler this is done implicitly)
-        gate_samples[:, -1] = torch.ones_like(gate_samples[:, -1])
 
         # Also merge the position ids.
         position_ids_downsampled = torch.zeros(batch_size, max_n_dst, dtype=position_ids.dtype).to(x.device)
@@ -509,10 +506,7 @@ class FlexibleBitterLLM(nn.Module):
             down_gate_samples = torch.where(down_gate_mask.unsqueeze(-1), prescribed_down_gate_samples.unsqueeze(-1), model_down_gate_samples)
 
         # Hack: ensure that we always gate on the first token:
-        # We need to also set the corresponding logits to 100. to avoid the gradient exploding based on this.
-        down_gate_samples[:, 0] = 1.
-        down_gate_probs = torch.cat([torch.ones(batch_size, 1, 1, dtype=down_gate_probs.dtype).to(down_gate_probs.device), down_gate_probs[:, 1:]], dim=1)
-        down_gate_logits = torch.cat([100*torch.ones(batch_size, 1, 1, dtype=down_gate_logits.dtype).to(down_gate_logits.device), down_gate_logits[:, 1:]], dim=1)
+        down_gate_samples, down_gate_probs, down_gate_logits = gate_first_and_last_tokens(down_gate_samples, down_gate_probs, down_gate_logits)
 
         # Merge the tokens into the next token where the gate is 1.
         down_gate_samples = down_gate_samples.squeeze(-1)
