@@ -15,6 +15,7 @@ from torch import nn
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from torch.profiler import record_function
 
 # TODO: migrate some things from bitter_llm.py to utils.py
 from .utils import display_gpu_memory, display_gating
@@ -55,7 +56,7 @@ class ExactRandomGater(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, _ = x.shape
-        num_ones = round(seq_len * self.downsample_rate)
+        num_ones = 1024 # round(seq_len * self.downsample_rate)
 
         # Generate random values for each position
         latents = torch.rand(batch_size, seq_len, 1, device=x.device)
@@ -585,70 +586,56 @@ class FlexibleBitterLLM(nn.Module):
 
 
 
-def select_next_token_logits(logits, next_token_ids):
+def select_next_token_cross_entropy(logits, next_token_ids, next_token_loss_mask):
     current_token_logits = logits[:, :-1]
-    next_token_logits = F.cross_entropy(current_token_logits.transpose(1, 2), next_token_ids, reduction="none") # Transpose as F.cross_entropy wants shape [batch, classes, ...]
-    return next_token_logits
+    next_token_cross_entropy = F.cross_entropy(current_token_logits.transpose(1, 2), next_token_ids, reduction="none") # Transpose as F.cross_entropy wants shape [batch, classes, ...]
+    next_token_cross_entropy = next_token_cross_entropy * next_token_loss_mask
+    return next_token_cross_entropy
 
 
-def off_policy_flexible_training_step(
-        model, batch, optimizer, scheduler=None, accelerator=None, learn_gating=True, downsample_rate_target=0.25, consistency_loss_weight=2., discount_rate = 0.9, relative_gating_loss_weight=1., use_off_policy=True, early_output_loss_weight=0.,
-        early_exit_advantage_estimate=False
+def per_token_losses_backbone(
+        batch, loss_mask, out, off_policy_gate_probs,
+        discount_rate = 0.9, learn_gating=True, early_exit_advantage_estimate=True
     ):
-
-    batch_size, _ = batch.shape
-
-    optimizer.zero_grad()
-
-    if use_off_policy:
-        # For now: only consider Random gating
-        off_policy_gate_probs = torch.ones_like(batch) * downsample_rate_target
-        prescribed_down_gate_samples = torch.bernoulli(off_policy_gate_probs)
-    else:
-        prescribed_down_gate_samples = None
-
-    out = model(batch, prescribed_down_gate_samples=prescribed_down_gate_samples)
-
+    """
+    The "backbone" of the loss computations. Computes per-token losses such as the next-token probabilities, the gating loss, the discounted rewards.
+    """
     logits = out["logits"]
     early_logits = out["early_logits"]
     down_gate_samples = out["down_gate_samples"]
-
     on_policy_probs = out["down_gate_probs"]
     on_policy_logits = out["down_gate_logits"]
 
-    if not use_off_policy:
-        off_policy_gate_probs = on_policy_probs
-
     # Compute autoregressive loss: log probability of next token. (for an early insertion of the lm head as well as the late lm head)
+    batch_size, _ = batch.shape
     next_token_ids = batch[:, 1:]
+    next_token_loss_mask = loss_mask[:, 1:]
 
-    next_token_logits = select_next_token_logits(logits, next_token_ids)
-    early_next_token_logits = select_next_token_logits(early_logits, next_token_ids)
+    next_token_cross_entropy = select_next_token_cross_entropy(logits, next_token_ids, next_token_loss_mask)
+    early_next_token_cross_entropy = select_next_token_cross_entropy(early_logits, next_token_ids, next_token_loss_mask)
 
-    # Compute the in-context-learning score a la https://transformer-circuits.pub/2022/in-context-learning-and-induction-heads/index.html#d-footnote-13
-    in_context_learning_score = next_token_logits[:,2016:2048].mean() - next_token_logits[:,224:256].mean() 
-
-    late_ar_loss = next_token_logits.mean()
-    early_ar_loss = early_next_token_logits.mean()
-
-    ar_loss = (1 - early_output_loss_weight) * late_ar_loss + early_output_loss_weight * early_ar_loss
-
-    true_downsample_rate = on_policy_probs.mean()
+    per_token_losses = {
+        "next_token_cross_entropy": next_token_cross_entropy,
+        "early_next_token_cross_entropy": early_next_token_cross_entropy,
+        "next_token_loss_mask": next_token_loss_mask,
+    }
 
     if learn_gating:
         # Compute gating loss: discounted log probabilities of following token(s).
         if early_exit_advantage_estimate:
-            rewards = next_token_logits - early_next_token_logits
+            rewards = early_next_token_cross_entropy - next_token_cross_entropy
         else:
-            rewards = next_token_logits
+            rewards = - next_token_cross_entropy
+    
+        # Simple way to normalise rewards: compute the mean over the batch dimension (induction heads could cause dependence on the sequence index).
+        mean_rewards = (rewards * next_token_loss_mask).sum(dim=0) / next_token_loss_mask.sum(dim=0) # Mask out the padding tokens as they have zero reward and would skew the mean.
+        mean_rewards = mean_rewards.unsqueeze(0)
+        rewards = (rewards - mean_rewards)*next_token_loss_mask
+        discounted_rewards = discounted_rewards_torch(rewards, discount_rate)
 
-        rewards_padded = torch.cat([rewards, torch.zeros(batch_size, 1, device=rewards.device)], dim=-1) # Pad the last reward as zero
-        discounted_rewards = discounted_rewards_torch(rewards_padded, discount_rate)
-        discounted_rewards = (discounted_rewards - discounted_rewards.mean(dim=0)) # Simple estimate of the advantage (induction heads cause dependence on the sequence)
-
-        # action 0 = continue, action 1 = gate
+        # actions: 0 = continue, 1 = gate
         action_log_probs = torch.stack([torch.zeros_like(on_policy_logits), on_policy_logits], dim=1) # As a sigmoid is equivalent to having one logit as 0.
-        selected_action_log_probs = F.cross_entropy(action_log_probs, down_gate_samples, reduction="none")
+        selected_action_cross_entropy = F.cross_entropy(action_log_probs, down_gate_samples, reduction="none")
 
         # likelihood_ratios [:, :, 1] gives the likelihood ratio for the action of gating.
         likelihood_ratios = torch.stack([
@@ -661,6 +648,94 @@ def off_policy_flexible_training_step(
         selected_action_likelihood_ratios = likelihood_ratios.gather(dim=-1, index=down_gate_samples.unsqueeze(-1))
         selected_action_likelihood_ratios = selected_action_likelihood_ratios.squeeze(-1)
 
+        per_token_losses.update({
+            "selected_action_cross_entropy": selected_action_cross_entropy,
+            "selected_action_likelihood_ratios": selected_action_likelihood_ratios,
+            "rewards": rewards,
+            "discounted_rewards": discounted_rewards
+        })
+
+    return per_token_losses
+
+
+def in_context_learning_score(next_token_ce, loss_mask, window_size=32, early_index=224, late_index=2016):
+    """
+    Compute the in-context-learning score a la https://transformer-circuits.pub/2022/in-context-learning-and-induction-heads/
+    """
+    # We use the loss mask from the later tokens in the sequence to ignore sequences which are too short.
+    delayed_loss_mask = loss_mask[:,late_index:late_index+window_size]
+    in_context_learning_score = (delayed_loss_mask * (next_token_ce[:,late_index:late_index+window_size] - next_token_ce[:,early_index:early_index+window_size])).sum() / delayed_loss_mask.sum()
+    return in_context_learning_score
+
+
+def off_policy_flexible_training_step(
+        model, optimizer, batch, loss_mask, scheduler=None, accelerator=None, learn_gating=True, downsample_rate_target=0.25, consistency_loss_weight=2., discount_rate = 0.9, relative_gating_loss_weight=1., use_off_policy=True, early_output_loss_weight=0.,
+        early_exit_advantage_estimate=False
+    ):
+    """
+    Performs a single training step for the model.
+
+    batch: [batch_size, seq_len] the token ids
+    loss_mask: [batch_size, seq_len] a mask which is 1 for tokens which should be used for loss computation (i.e. not padding).
+    optimizer: optimizer
+    scheduler: scheduler
+    accelerator: Accelerator
+    """
+
+    batch_size, _ = batch.shape
+
+    optimizer.zero_grad()
+
+    if use_off_policy:
+        # For now: only consider Random gating
+        off_policy_gate_probs = torch.ones_like(batch) * downsample_rate_target
+        prescribed_down_gate_samples = torch.bernoulli(off_policy_gate_probs)
+    else:
+        prescribed_down_gate_samples = None
+
+    with record_function("forward"):
+        out = model(batch, prescribed_down_gate_samples=prescribed_down_gate_samples)
+    
+    on_policy_probs = out["down_gate_probs"]
+
+    if not use_off_policy:
+        off_policy_gate_probs = on_policy_probs
+
+    with record_function("per_token_losses_backbone"):
+        per_token_losses = per_token_losses_backbone(
+            batch, 
+            loss_mask, 
+            out, 
+            off_policy_gate_probs, 
+            learn_gating=learn_gating, 
+            early_exit_advantage_estimate=early_exit_advantage_estimate
+        )
+
+    next_token_cross_entropy = per_token_losses["next_token_cross_entropy"]
+    early_next_token_cross_entropy = per_token_losses["early_next_token_cross_entropy"]
+    next_token_loss_mask = per_token_losses["next_token_loss_mask"]
+
+    # For logging: compute the in-context-learning score a la https://transformer-circuits.pub/2022/in-context-learning-and-induction-heads/
+    icl_score = in_context_learning_score(next_token_cross_entropy, next_token_loss_mask)
+
+    late_ar_loss = (next_token_cross_entropy).sum() / next_token_loss_mask.sum()
+    early_ar_loss = (early_next_token_cross_entropy).sum() / next_token_loss_mask.sum()
+
+    ar_loss = (1 - early_output_loss_weight) * late_ar_loss + early_output_loss_weight * early_ar_loss
+    
+    true_downsample_rate = on_policy_probs.mean()
+
+    if learn_gating:
+        selected_action_cross_entropy = per_token_losses["selected_action_cross_entropy"]
+        selected_action_likelihood_ratios = per_token_losses["selected_action_likelihood_ratios"]
+        discounted_rewards = per_token_losses["discounted_rewards"]
+
+        # For logging: compute the selected action cross entropy.
+        mean_selected_action_cross_entropy = selected_action_cross_entropy.mean().item()
+        
+        # Compute the gating loss (such that calling backward() computes the policy gradient).
+        discounted_rewards = torch.cat([discounted_rewards, torch.zeros(batch_size, 1, device=discounted_rewards.device)], dim=-1) # Pad the last reward as zero (the only corresponding action is forced as gating).
+        selected_action_log_probs = -selected_action_cross_entropy
         gating_loss = - (selected_action_likelihood_ratios * discounted_rewards * selected_action_log_probs).mean() # Negative as we want to maximise the reward.
         gating_loss = relative_gating_loss_weight * gating_loss
 
@@ -668,26 +743,31 @@ def off_policy_flexible_training_step(
         down_gate_rate_loss = consistency_loss_weight*(downsample_rate_target - true_downsample_rate) **2
 
         total_loss = ar_loss + gating_loss + down_gate_rate_loss
+
     else:
-        selected_action_log_probs = torch.tensor(0.0)
+        # For logging purposes set these to zero.
         gating_loss = torch.tensor(0.0)
-        down_gate_rate_loss = torch.tensor(0.0) # For logging purposes.
+        down_gate_rate_loss = torch.tensor(0.0) 
+        mean_selected_action_cross_entropy = torch.tensor(0.0)
+        
+        # The only loss is the autoregressive loss.
         total_loss = ar_loss
 
-    # Optimizer step
-    if accelerator is None:
-        total_loss.backward()
-        pre_clip_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-    else:
-        accelerator.backward(total_loss)
-        pre_clip_grad_norm = accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)
-    
-    optimizer.step()
+    with record_function("backward"):
+        # Optimizer step
+        if accelerator is None:
+            total_loss.backward()
+            pre_clip_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        else:
+            accelerator.backward(total_loss)
+            pre_clip_grad_norm = accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
+        optimizer.step()
 
-    if scheduler is not None:
-        scheduler.step()
+        if scheduler is not None:
+            scheduler.step()
 
-    optimizer.zero_grad()
+        optimizer.zero_grad()
 
     out = {
         "ar_loss": ar_loss.item(),
@@ -697,9 +777,9 @@ def off_policy_flexible_training_step(
         "true_downsample_rate": true_downsample_rate.item(),
         "rate_consistency_loss": down_gate_rate_loss.item(),
         "total_loss": total_loss.item(),
-        "selected_action_ce": selected_action_log_probs.mean().item(),
+        "mean_selected_action_ce": mean_selected_action_cross_entropy.item(),
         "pre_clip_grad_norm": pre_clip_grad_norm.item(),
-        "in_context_learning_score": in_context_learning_score.item()
+        "in_context_learning_score": icl_score.item()
     }
     return out
 
@@ -838,7 +918,7 @@ def flexible_training_loop_warm_start_accelerate(
             batch = batch.to(device)
 
             loss_dict = off_policy_flexible_training_step(
-                model, batch, optimizer, lr_scheduler, accelerator, use_off_policy=use_off_policy,
+                model, optimizer, batch, lr_scheduler, accelerator, use_off_policy=use_off_policy,
                 **training_loop_kwargs
             )
 
