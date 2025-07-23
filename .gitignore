@@ -16,6 +16,6 @@ __pycache__/experiment_1.cpython-312.pyc
 *.wandb
 *.wandb.synced
 *.tar.gz
-*/logs/wandb/
+*/wandb/
 
 *.env

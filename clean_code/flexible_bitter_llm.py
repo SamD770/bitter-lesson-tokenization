@@ -7,7 +7,7 @@ Also: compatible with the new Gemma2 model implementation in transformers.
 """
 
 from copy import deepcopy
-
+import time
 import numpy as np
 import pandas as pd
 
@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 from torch.profiler import record_function
 
 # TODO: migrate some things from bitter_llm.py to utils.py
-from .utils import display_gpu_memory, display_gating
+from .utils import display_gpu_memory, display_gating, count_parameters
 from .bitter_llm import LinearGater, RandomGater, EquidistantGater, AverageTokenDownsampler, get_merge_dst, create_gemma2DecoderLayer, discounted_rewards_torch
 from .conditional_sequential import SequentiallyDependentRandomGater
 from transformers.models.gemma2.modeling_gemma2 import Gemma2Model, Gemma2Config, Gemma2RotaryEmbedding, HybridCache, StaticCache, Cache
@@ -403,6 +403,15 @@ class FlexibleBitterLLM(nn.Module):
         self.upsampler = UpsamplerClass()
         self.rotary_emb = Gemma2RotaryEmbedding(config=self.byte_layer_config)
 
+        self.down_layer_parameters_count = count_parameters(self.down_layers)
+        self.up_layer_parameters_count = count_parameters(self.up_layers)
+        self.mid_layer_parameters_count = count_parameters(self.mid_layers)
+
+        self.unembedding_parameters_count = count_parameters(self.output_layer)
+        self.early_exit_parameters_count = count_parameters(self.early_output_layer)
+        self.gate_predictor_parameters_count = count_parameters(self.down_layer_gate)
+
+        self.byte_level_parameters_count = self.down_layer_parameters_count + self.up_layer_parameters_count + self.unembedding_parameters_count + self.gate_predictor_parameters_count + self.early_exit_parameters_count
 
     def forward(
             self, 
@@ -444,7 +453,7 @@ class FlexibleBitterLLM(nn.Module):
 
         out.update({
             "logits": logits,
-            "early_logits": early_logits
+            "early_logits": early_logits,
         })
 
         return out
@@ -572,6 +581,21 @@ class FlexibleBitterLLM(nn.Module):
         return y, x_early_exit, out
 
 
+    def get_num_flops(self, batch, out):
+        """
+        Estimate the number of flops for a forward/backward pass.
+        """
+        batch_size, sequence_length = batch.shape
+        patch_sequence_length = out["down_gate_samples"].sum(dim=0).max()
+
+        byte_level_flops = 6 * self.byte_level_parameters_count * batch_size * sequence_length
+        mid_layer_flops = 6 * self.mid_layer_parameters_count * batch_size * patch_sequence_length
+
+        total_flops = byte_level_flops + mid_layer_flops
+
+        return total_flops
+    
+    
     @property
     def attn_implementation(self):
         return getattr(self, '_attn_implementation', None)
@@ -583,6 +607,8 @@ class FlexibleBitterLLM(nn.Module):
         # All layers contain references to these config objects:
         self.byte_layer_config._attn_implementation = attn_implementation
         self.deep_layer_config._attn_implementation = attn_implementation
+
+
 
 
 
@@ -662,7 +688,13 @@ def in_context_learning_score(next_token_ce, loss_mask, window_size=32, early_in
     """
     Compute the in-context-learning score a la https://transformer-circuits.pub/2022/in-context-learning-and-induction-heads/
     """
+    # If all the sequences are too short, return 0.
+    _, batch_max_seq_len = loss_mask.shape
+    if batch_max_seq_len < late_index + window_size:
+        return torch.tensor(0.0, device=next_token_ce.device)
+    
     # We use the loss mask from the later tokens in the sequence to ignore sequences which are too short.
+    # TODO: reweighting icl score across devices.
     delayed_loss_mask = loss_mask[:,late_index:late_index+window_size]
     in_context_learning_score = (delayed_loss_mask * (next_token_ce[:,late_index:late_index+window_size] - next_token_ce[:,early_index:early_index+window_size])).sum() / delayed_loss_mask.sum()
     return in_context_learning_score
@@ -673,13 +705,13 @@ def off_policy_flexible_training_step(
         early_exit_advantage_estimate=False
     ):
     """
-    Performs a single training step for the model.
+    Performs a single training step for the model. 
 
-    batch: [batch_size, seq_len] the token ids
-    loss_mask: [batch_size, seq_len] a mask which is 1 for tokens which should be used for loss computation (i.e. not padding).
-    optimizer: optimizer
-    scheduler: scheduler
-    accelerator: Accelerator
+    batch: [batch_size, seq_len] torch Tensor of the token ids
+    loss_mask: [batch_size, seq_len] torch Tensor of a mask which is 1 for tokens which should be used for loss computation (i.e. not padding).
+    optimizer: torch.optim.Optimizer
+    scheduler: torch.optim.lr_scheduler._LRScheduler
+    accelerator: accelerate.Accelerator
     """
 
     batch_size, _ = batch.shape
@@ -694,9 +726,9 @@ def off_policy_flexible_training_step(
         prescribed_down_gate_samples = None
 
     with record_function("forward"):
-        out = model(batch, prescribed_down_gate_samples=prescribed_down_gate_samples)
+        out_model = model(batch, prescribed_down_gate_samples=prescribed_down_gate_samples)
     
-    on_policy_probs = out["down_gate_probs"]
+    on_policy_probs = out_model["down_gate_probs"]
 
     if not use_off_policy:
         off_policy_gate_probs = on_policy_probs
@@ -705,7 +737,7 @@ def off_policy_flexible_training_step(
         per_token_losses = per_token_losses_backbone(
             batch, 
             loss_mask, 
-            out, 
+            out_model, 
             off_policy_gate_probs, 
             learn_gating=learn_gating, 
             early_exit_advantage_estimate=early_exit_advantage_estimate
@@ -731,7 +763,7 @@ def off_policy_flexible_training_step(
         discounted_rewards = per_token_losses["discounted_rewards"]
 
         # For logging: compute the selected action cross entropy.
-        mean_selected_action_cross_entropy = selected_action_cross_entropy.mean().item()
+        mean_selected_action_cross_entropy = selected_action_cross_entropy.mean()
         
         # Compute the gating loss (such that calling backward() computes the policy gradient).
         discounted_rewards = torch.cat([discounted_rewards, torch.zeros(batch_size, 1, device=discounted_rewards.device)], dim=-1) # Pad the last reward as zero (the only corresponding action is forced as gating).
@@ -746,9 +778,9 @@ def off_policy_flexible_training_step(
 
     else:
         # For logging purposes set these to zero.
-        gating_loss = torch.tensor(0.0)
-        down_gate_rate_loss = torch.tensor(0.0) 
-        mean_selected_action_cross_entropy = torch.tensor(0.0)
+        gating_loss = torch.tensor(0.0, device=accelerator.device)
+        down_gate_rate_loss = torch.tensor(0.0, device=accelerator.device) 
+        mean_selected_action_cross_entropy = torch.tensor(0.0, device=accelerator.device)
         
         # The only loss is the autoregressive loss.
         total_loss = ar_loss
@@ -769,18 +801,40 @@ def off_policy_flexible_training_step(
 
         optimizer.zero_grad()
 
-    out = {
-        "ar_loss": ar_loss.item(),
-        "late_ar_loss": late_ar_loss.item(),
-        "early_ar_loss": early_ar_loss.item(),
-        "gating_loss": gating_loss.item(),
-        "true_downsample_rate": true_downsample_rate.item(),
-        "rate_consistency_loss": down_gate_rate_loss.item(),
-        "total_loss": total_loss.item(),
-        "mean_selected_action_ce": mean_selected_action_cross_entropy.item(),
-        "pre_clip_grad_norm": pre_clip_grad_norm.item(),
-        "in_context_learning_score": icl_score.item()
+    # print(f"rank:{accelerator.process_index} {total_loss.item()=}")
+    # total_loss = accelerator.reduce(total_loss, reduction="mean")
+    # print(f"rank:{accelerator.process_index} {total_loss.item()=}")
+
+    out_avg = {
+        "ar_loss": ar_loss,
+        "late_ar_loss": late_ar_loss,
+        "early_ar_loss": early_ar_loss,
+        "gating_loss": gating_loss,
+        "true_downsample_rate": true_downsample_rate,
+        "rate_consistency_loss": down_gate_rate_loss,
+        "total_loss": total_loss,
+        "mean_selected_action_ce": mean_selected_action_cross_entropy,
+        "pre_clip_grad_norm": pre_clip_grad_norm,
+        "in_context_learning_score": icl_score
     }
+
+    flops = model.module.get_num_flops(batch, out_model)
+
+    out_sum = {
+        "flops": flops,
+    }
+
+    for k, v in out_avg.items():
+        try:
+            out_avg[k] = accelerator.reduce(v, reduction="mean").item()
+        except:
+            print(f"error reducing rank:{accelerator.process_index} {k=} {v.shape=} {v.device=}")
+
+    for k, v in out_sum.items():
+        out_sum[k] = accelerator.reduce(v, reduction="sum").item()
+
+    out = {**out_avg, **out_sum}
+
     return out
 
 
@@ -791,6 +845,9 @@ def flexible_training_loop_warm_start(
         downsample_rate_target=0.25, consistency_loss_weight=2., early_output_loss_weight=0., 
         early_exit_advantage_estimate=False
     ):
+    """
+    DEPRECATED: use the accelerate version instead.
+    """
 
     # Create data loaders
     # Create distributed sampler and data loader    
@@ -882,8 +939,6 @@ def flexible_training_loop_warm_start(
     return train_losses
 
 
-
-
 def flexible_training_loop_warm_start_accelerate(
         model, optimizer, lr_scheduler, train_dataloader, accelerator, tokenizer, 
         num_epochs=1, warm_start_steps=None, max_seq_length=1024, batch_print_every=10, print_example_gating=True, 
@@ -898,7 +953,9 @@ def flexible_training_loop_warm_start_accelerate(
     device = accelerator.device
     model = model.to(device)
 
-    bytes_elapsed = 0
+    all_bytes_elapsed = 0
+    non_padding_bytes_elapsed = 0
+    flops_elapsed = 0
 
     # Training loop
     for epoch in range(num_epochs):
@@ -907,29 +964,51 @@ def flexible_training_loop_warm_start_accelerate(
 
         for batch_count, batch in enumerate(train_dataloader):
 
+            start_time = time.time()
+
             if warm_start_steps is not None and batch_count < warm_start_steps:
                 use_off_policy = True
             else:
                 use_off_policy = False
                 
-            batch = batch["text"]
-            batch = tokenizer(batch, return_tensors="pt", padding=True)["input_ids"]
+            batch_text = batch["text"]
+            tokenized = tokenizer(batch_text, return_tensors="pt", padding=True)
+            loss_mask = tokenized["attention_mask"]
+            batch = tokenized["input_ids"]
+
             batch = batch[:, :max_seq_length]  # Truncate to maximum length of 4096 to save GPU memory.
+            loss_mask = loss_mask[:, :max_seq_length]
             batch = batch.to(device)
+            loss_mask = loss_mask.to(device)
 
             loss_dict = off_policy_flexible_training_step(
-                model, optimizer, batch, lr_scheduler, accelerator, use_off_policy=use_off_policy,
+                model, optimizer, batch, loss_mask, lr_scheduler, accelerator, use_off_policy=use_off_policy,
                 **training_loop_kwargs
             )
 
-            bytes_elapsed += batch.numel() * accelerator.num_processes
-            loss_dict["bytes_elapsed"] = bytes_elapsed
-            loss_dict["learning_rate"] = lr_scheduler.get_last_lr()[0]
+            all_bytes = accelerator.reduce(torch.tensor(batch.numel(), device=accelerator.device), reduction="sum").item()
+            non_padding_bytes = accelerator.reduce(loss_mask.sum(), reduction="sum").item()
+
+            all_bytes_elapsed += all_bytes
+            non_padding_bytes_elapsed += non_padding_bytes
+            flops_elapsed += loss_dict["flops"]
+
+            batch_wallclock_time = time.time() - start_time
+
+            loss_dict.update({
+                "all_bytes": all_bytes,
+                "non_padding_bytes": non_padding_bytes,
+                "all_bytes_elapsed": all_bytes_elapsed,
+                "non_padding_bytes_elapsed": non_padding_bytes_elapsed,
+                "flops_elapsed": flops_elapsed,
+                "learning_rate": lr_scheduler.get_last_lr()[0],
+                "batch_wallclock_time": batch_wallclock_time
+            })
 
             accelerator.log(loss_dict, step=batch_count)
 
             if batch_count % batch_print_every == 0 and accelerator.is_main_process:
-                print(f"{accelerator.device}: Bytes elapsed: {bytes_elapsed/1e6:.1f}M ar train loss: {loss_dict['ar_loss']} nats/token selected action ce: {loss_dict['selected_action_ce']:.6f}")
+                print(f"{accelerator.device}: Bytes elapsed: {non_padding_bytes_elapsed/1e6:.1f}M ar train loss: {loss_dict['ar_loss']} nats/token selected action ce: {loss_dict['mean_selected_action_ce']:.6f}")
 
             if batch_limit is not None and batch_count > batch_limit:
                 break

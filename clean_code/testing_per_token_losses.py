@@ -28,6 +28,8 @@ loss_mask = batch['attention_mask']
 input_ids = batch['input_ids']
 next_token_ids = input_ids[:, 1:]
 
+print(f"batch shape: {input_ids.shape=} number of bytes in the batch: {loss_mask.sum().item()=}")
+
 # Test 1: if all the logits are 0, but we interfere with the early model uniformly across the sequence, rewards all should be positive but the discounted reward should still be 0. 
 
 print("-"*100)
