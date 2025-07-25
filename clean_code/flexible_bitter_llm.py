@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 from torch.profiler import record_function
 
 # TODO: migrate some things from bitter_llm.py to utils.py
-from .utils import display_gpu_memory, display_gating, count_parameters
+from .utils import display_gpu_memory, display_gating, count_parameters, lookup_gpu_TFLOPS
 from .bitter_llm import LinearGater, RandomGater, EquidistantGater, AverageTokenDownsampler, get_merge_dst, create_gemma2DecoderLayer, discounted_rewards_torch
 from .conditional_sequential import SequentiallyDependentRandomGater
 from transformers.models.gemma2.modeling_gemma2 import Gemma2Model, Gemma2Config, Gemma2RotaryEmbedding, HybridCache, StaticCache, Cache
@@ -403,15 +403,22 @@ class FlexibleBitterLLM(nn.Module):
         self.upsampler = UpsamplerClass()
         self.rotary_emb = Gemma2RotaryEmbedding(config=self.byte_layer_config)
 
-        self.down_layer_parameters_count = count_parameters(self.down_layers)
-        self.up_layer_parameters_count = count_parameters(self.up_layers)
-        self.mid_layer_parameters_count = count_parameters(self.mid_layers)
+        # Pre-compute these for the flop counting.
+        self.down_layers_parameters_count = count_parameters(self.down_layers)
+        self.up_layers_parameters_count = count_parameters(self.up_layers)
+        self.mid_layers_parameters_count = count_parameters(self.mid_layers)
 
         self.unembedding_parameters_count = count_parameters(self.output_layer)
         self.early_exit_parameters_count = count_parameters(self.early_output_layer)
-        self.gate_predictor_parameters_count = count_parameters(self.down_layer_gate)
+        self.down_layer_gate_parameters_count = count_parameters(self.down_layer_gate)
 
-        self.byte_level_parameters_count = self.down_layer_parameters_count + self.up_layer_parameters_count + self.unembedding_parameters_count + self.gate_predictor_parameters_count + self.early_exit_parameters_count
+        self.byte_level_parameters_count = (
+            self.down_layers_parameters_count 
+            + self.up_layers_parameters_count 
+            + self.unembedding_parameters_count 
+            + self.down_layer_gate_parameters_count 
+            + self.early_exit_parameters_count
+        )
 
     def forward(
             self, 
@@ -586,10 +593,10 @@ class FlexibleBitterLLM(nn.Module):
         Estimate the number of flops for a forward/backward pass.
         """
         batch_size, sequence_length = batch.shape
-        patch_sequence_length = out["down_gate_samples"].sum(dim=0).max()
+        patch_sequence_length = out["down_gate_samples"].sum(dim=1).max()
 
         byte_level_flops = 6 * self.byte_level_parameters_count * batch_size * sequence_length
-        mid_layer_flops = 6 * self.mid_layer_parameters_count * batch_size * patch_sequence_length
+        mid_layer_flops = 6 * self.mid_layers_parameters_count * batch_size * patch_sequence_length
 
         total_flops = byte_level_flops + mid_layer_flops
 
@@ -956,6 +963,7 @@ def flexible_training_loop_warm_start_accelerate(
     all_bytes_elapsed = 0
     non_padding_bytes_elapsed = 0
     flops_elapsed = 0
+    gpu_TFLOPS = lookup_gpu_TFLOPS()
 
     # Training loop
     for epoch in range(num_epochs):
@@ -988,12 +996,15 @@ def flexible_training_loop_warm_start_accelerate(
 
             all_bytes = accelerator.reduce(torch.tensor(batch.numel(), device=accelerator.device), reduction="sum").item()
             non_padding_bytes = accelerator.reduce(loss_mask.sum(), reduction="sum").item()
+            batch_flops = loss_dict["flops"]
 
             all_bytes_elapsed += all_bytes
             non_padding_bytes_elapsed += non_padding_bytes
-            flops_elapsed += loss_dict["flops"]
+            flops_elapsed += batch_flops
 
             batch_wallclock_time = time.time() - start_time
+
+            model_flops_utilization = batch_flops / (batch_wallclock_time * gpu_TFLOPS * 1e12)
 
             loss_dict.update({
                 "all_bytes": all_bytes,
@@ -1002,13 +1013,14 @@ def flexible_training_loop_warm_start_accelerate(
                 "non_padding_bytes_elapsed": non_padding_bytes_elapsed,
                 "flops_elapsed": flops_elapsed,
                 "learning_rate": lr_scheduler.get_last_lr()[0],
-                "batch_wallclock_time": batch_wallclock_time
+                "batch_wallclock_time": batch_wallclock_time,
+                "model_flops_utilization": model_flops_utilization
             })
 
             accelerator.log(loss_dict, step=batch_count)
 
             if batch_count % batch_print_every == 0 and accelerator.is_main_process:
-                print(f"{accelerator.device}: Bytes elapsed: {non_padding_bytes_elapsed/1e6:.1f}M ar train loss: {loss_dict['ar_loss']} nats/token selected action ce: {loss_dict['mean_selected_action_ce']:.6f}")
+                print(f"{accelerator.device}: Bytes elapsed: {non_padding_bytes_elapsed/1e6:.1f}M ar train loss: {loss_dict['ar_loss']} nats/token selected action ce: {loss_dict['mean_selected_action_ce']:.6f} model flops utilization: {model_flops_utilization:.2%}")
 
             if batch_limit is not None and batch_count > batch_limit:
                 break

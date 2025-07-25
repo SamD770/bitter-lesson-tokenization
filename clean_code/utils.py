@@ -2,6 +2,36 @@
 Utility functions for the bitter-lesson-tokenization project.
 """
 import torch
+from accelerate.utils import get_gpu_info
+
+fp16_gpu_TFLOPS_lookup = {
+    "NVIDIA TITAN Xp": 24.8,
+    "NVIDIA GeForce RTX 3090": 35.58,
+    "NVIDIA GeForce RTX A6000": 100,
+    "A100": 312
+}
+
+
+def lookup_gpu_TFLOPS():
+    """
+    Returns the total TFLOPS of all GPUs in the system.
+    """
+    gpu_list, _ = get_gpu_info()
+    gpu_TFLOPS = []
+
+    for gpu in gpu_list:
+        if gpu in fp16_gpu_TFLOPS_lookup:
+            gpu_TFLOPS.append(fp16_gpu_TFLOPS_lookup[gpu])
+        else:
+            print(f"GPU {gpu} not found in fp16_gpu_TFLOPS_lookup")
+            return None
+
+    return sum(gpu_TFLOPS)
+
+
+
+
+
 
 # Helper functions to count the number of parameters in a torch.nn.Module
 def count_parameters(module):
