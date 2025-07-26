@@ -949,7 +949,7 @@ def flexible_training_loop_warm_start(
 def flexible_training_loop_warm_start_accelerate(
         model, optimizer, lr_scheduler, train_dataloader, accelerator, tokenizer, 
         num_epochs=1, warm_start_steps=None, max_seq_length=1024, batch_print_every=10, print_example_gating=True, 
-        batch_limit=None,
+        batch_limit=None, gradient_accumulation_steps=1,
         **training_loop_kwargs
     ):
     """
@@ -971,56 +971,57 @@ def flexible_training_loop_warm_start_accelerate(
         model.train()
 
         for batch_count, batch in enumerate(train_dataloader):
+            with accelerator.accumulate(model):
 
-            start_time = time.time()
+                start_time = time.time()
 
-            if warm_start_steps is not None and batch_count < warm_start_steps:
-                use_off_policy = True
-            else:
-                use_off_policy = False
-                
-            batch_text = batch["text"]
-            tokenized = tokenizer(batch_text, return_tensors="pt", padding=True)
-            loss_mask = tokenized["attention_mask"]
-            batch = tokenized["input_ids"]
+                if warm_start_steps is not None and batch_count < warm_start_steps:
+                    use_off_policy = True
+                else:
+                    use_off_policy = False
+                    
+                batch_text = batch["text"]
+                tokenized = tokenizer(batch_text, return_tensors="pt", padding=True)
+                loss_mask = tokenized["attention_mask"]
+                batch = tokenized["input_ids"]
 
-            batch = batch[:, :max_seq_length]  # Truncate to maximum length of 4096 to save GPU memory.
-            loss_mask = loss_mask[:, :max_seq_length]
-            batch = batch.to(device)
-            loss_mask = loss_mask.to(device)
+                batch = batch[:, :max_seq_length]  # Truncate to maximum length of 4096 to save GPU memory.
+                loss_mask = loss_mask[:, :max_seq_length]
+                batch = batch.to(device)
+                loss_mask = loss_mask.to(device)
 
-            loss_dict = off_policy_flexible_training_step(
-                model, optimizer, batch, loss_mask, lr_scheduler, accelerator, use_off_policy=use_off_policy,
-                **training_loop_kwargs
-            )
+                loss_dict = off_policy_flexible_training_step(
+                    model, optimizer, batch, loss_mask, lr_scheduler, accelerator, use_off_policy=use_off_policy,
+                    **training_loop_kwargs
+                )
 
-            all_bytes = accelerator.reduce(torch.tensor(batch.numel(), device=accelerator.device), reduction="sum").item()
-            non_padding_bytes = accelerator.reduce(loss_mask.sum(), reduction="sum").item()
-            batch_flops = loss_dict["flops"]
+                all_bytes = accelerator.reduce(torch.tensor(batch.numel(), device=accelerator.device), reduction="sum").item()
+                non_padding_bytes = accelerator.reduce(loss_mask.sum(), reduction="sum").item()
+                batch_flops = loss_dict["flops"]
 
-            all_bytes_elapsed += all_bytes
-            non_padding_bytes_elapsed += non_padding_bytes
-            flops_elapsed += batch_flops
+                all_bytes_elapsed += all_bytes
+                non_padding_bytes_elapsed += non_padding_bytes
+                flops_elapsed += batch_flops
 
-            batch_wallclock_time = time.time() - start_time
+                batch_wallclock_time = time.time() - start_time
 
-            model_flops_utilization = batch_flops / (batch_wallclock_time * gpu_TFLOPS * 1e12)
+                model_flops_utilization = batch_flops / (batch_wallclock_time * gpu_TFLOPS * 1e12)
 
-            loss_dict.update({
-                "all_bytes": all_bytes,
-                "non_padding_bytes": non_padding_bytes,
-                "all_bytes_elapsed": all_bytes_elapsed,
-                "non_padding_bytes_elapsed": non_padding_bytes_elapsed,
-                "flops_elapsed": flops_elapsed,
-                "learning_rate": lr_scheduler.get_last_lr()[0],
-                "batch_wallclock_time": batch_wallclock_time,
-                "model_flops_utilization": model_flops_utilization
-            })
+                loss_dict.update({
+                    "all_bytes": all_bytes,
+                    "non_padding_bytes": non_padding_bytes,
+                    "all_bytes_elapsed": all_bytes_elapsed,
+                    "non_padding_bytes_elapsed": non_padding_bytes_elapsed,
+                    "flops_elapsed": flops_elapsed,
+                    "learning_rate": lr_scheduler.get_last_lr()[0],
+                    "batch_wallclock_time": batch_wallclock_time,
+                    "model_flops_utilization": model_flops_utilization
+                })
 
-            accelerator.log(loss_dict, step=batch_count)
+                accelerator.log(loss_dict, step=batch_count)
 
-            if batch_count % batch_print_every == 0 and accelerator.is_main_process:
-                print(f"{accelerator.device}: Bytes elapsed: {non_padding_bytes_elapsed/1e6:.1f}M ar train loss: {loss_dict['ar_loss']} nats/token selected action ce: {loss_dict['mean_selected_action_ce']:.6f} model flops utilization: {model_flops_utilization:.2%}")
+                if batch_count % batch_print_every == 0 and accelerator.is_main_process:
+                    print(f"{accelerator.device}: Bytes elapsed: {non_padding_bytes_elapsed/1e6:.1f}M ar train loss: {loss_dict['ar_loss']} nats/token selected action ce: {loss_dict['mean_selected_action_ce']:.6f} model flops utilization: {model_flops_utilization:.2%}")
 
-            if batch_limit is not None and batch_count > batch_limit:
-                break
+                if batch_limit is not None and batch_count > batch_limit:
+                    break
