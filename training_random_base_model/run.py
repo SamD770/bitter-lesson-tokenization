@@ -27,9 +27,12 @@ def main():
 
     username = "sdauncey"
     scratch_dir = f"/scratch/{username}/tokenizer_training"
+    # scratch_dir = "/workspace"
     logging_dir = os.path.join(scratch_dir, "wandb_logs")
 
     model_kwargs = get_model_kwargs(args.model_size)
+
+    accelerator =  Accelerator(log_with="wandb")
 
     # After testing, change these:
     # optimization_kwargs = get_optimization_kwargs(args.model_size)
@@ -86,7 +89,7 @@ def main():
     config_for_wandb["DownSamplerClass"] = config["DownSamplerClass"].__name__
 
 
-    accelerator =  Accelerator(log_with="wandb", gradient_accumulation_steps=gradient_accumulation_steps)
+    accelerator.gradient_accumulation_steps = gradient_accumulation_steps
 
     # For some reason, you need to pass the config to the init_kwargs when using wandb with accelerate in offline mode. https://github.com/huggingface/accelerate/issues/3607
     accelerator.init_trackers(
