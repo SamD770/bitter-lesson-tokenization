@@ -623,6 +623,7 @@ def select_next_token_cross_entropy(logits, next_token_ids, next_token_loss_mask
     current_token_logits = logits[:, :-1]
     next_token_cross_entropy = F.cross_entropy(current_token_logits.transpose(1, 2), next_token_ids, reduction="none") # Transpose as F.cross_entropy wants shape [batch, classes, ...]
     next_token_cross_entropy = next_token_cross_entropy * next_token_loss_mask
+    next_token_cross_entropy = next_token_cross_entropy.to(dtype=torch.float32) # upcast to float32 before reducing
     return next_token_cross_entropy
 
 
@@ -669,6 +670,7 @@ def per_token_losses_backbone(
         # actions: 0 = continue, 1 = gate
         action_log_probs = torch.stack([torch.zeros_like(on_policy_logits), on_policy_logits], dim=1) # As a sigmoid is equivalent to having one logit as 0.
         selected_action_cross_entropy = F.cross_entropy(action_log_probs, down_gate_samples, reduction="none")
+        action_log_probs = action_log_probs.to(dtype=torch.float32) # upcast to float32 before reducing
 
         # likelihood_ratios [:, :, 1] gives the likelihood ratio for the action of gating.
         likelihood_ratios = torch.stack([
@@ -680,6 +682,7 @@ def per_token_losses_backbone(
         # Get the likelihood ratios for the selected actions for importance sampling.
         selected_action_likelihood_ratios = likelihood_ratios.gather(dim=-1, index=down_gate_samples.unsqueeze(-1))
         selected_action_likelihood_ratios = selected_action_likelihood_ratios.squeeze(-1)
+        selected_action_likelihood_ratios = selected_action_likelihood_ratios.to(dtype=torch.float32) # upcast to float32 before reducing
 
         per_token_losses.update({
             "selected_action_cross_entropy": selected_action_cross_entropy,
