@@ -825,7 +825,11 @@ def off_policy_flexible_training_step(
         "in_context_learning_score": icl_score
     }
 
-    flops = model.module.get_num_flops(batch, out_model)
+
+    if accelerator is None:
+        flops = model.get_num_flops(batch, out_model)
+    else:
+        flops = model.module.get_num_flops(batch, out_model)
 
     out_sum = {
         "flops": flops,

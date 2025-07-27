@@ -1,0 +1,114 @@
+wandb_version: 1
+
+_wandb:
+  desc: null
+  value:
+    python_version: 3.11.12
+    cli_version: 0.19.11
+    framework: huggingface
+    huggingface_version: 4.51.3
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    start_time: 1753366921
+    t:
+      1:
+      - 1
+      - 11
+      - 41
+      - 49
+      - 51
+      - 55
+      - 71
+      3:
+      - 4
+      - 16
+      - 23
+      - 42
+      - 55
+      4: 3.11.12
+      5: 0.19.11
+      6: 4.51.3
+      8:
+      - 5
+      13: linux-x86_64
+seed:
+  desc: null
+  value: 42
+model_size:
+  desc: null
+  value: 18M
+num_epochs:
+  desc: null
+  value: 1
+max_seq_length:
+  desc: null
+  value: 4096
+batch_print_every:
+  desc: null
+  value: 1
+batch_limit:
+  desc: null
+  value: 100
+warm_start_steps:
+  desc: null
+  value: null
+learn_gating:
+  desc: null
+  value: false
+early_output_loss_weight:
+  desc: null
+  value: 0.2
+learning_rate:
+  desc: null
+  value: 0.0036
+effective_batch_size:
+  desc: null
+  value: 32
+warmup_bytes:
+  desc: null
+  value: 62000000.0
+training_bytes:
+  desc: null
+  value: 830000000.0
+batch_size:
+  desc: null
+  value: 8
+warmup_steps:
+  desc: null
+  value: 10
+total_steps:
+  desc: null
+  value: 100
+gradient_accumulation_steps:
+  desc: null
+  value: 2
+vocab_size:
+  desc: null
+  value: 256
+downsample_rate:
+  desc: null
+  value: 0.25
+sliding_window:
+  desc: null
+  value: 64
+GaterClass:
+  desc: null
+  value: ExactRandomGater
+DownSamplerClass:
+  desc: null
+  value: SelectTokenDownsampler
+embedding_dim:
+  desc: null
+  value: 384
+num_heads:
+  desc: null
+  value: 6
+n_down_layers:
+  desc: null
+  value: 2
+n_mid_layers:
+  desc: null
+  value: 6
+n_up_layers:
+  desc: null
+  value: 2

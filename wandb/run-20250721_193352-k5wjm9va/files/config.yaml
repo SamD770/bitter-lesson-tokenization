@@ -1,0 +1,87 @@
+_wandb:
+    value:
+        cli_version: 0.19.11
+        m: []
+        python_version: 3.11.12
+        t:
+            "1":
+                - 1
+                - 11
+                - 41
+                - 49
+                - 51
+                - 55
+                - 71
+            "2":
+                - 1
+                - 11
+                - 41
+                - 49
+                - 51
+                - 55
+                - 71
+            "3":
+                - 16
+                - 23
+                - 55
+            "4": 3.11.12
+            "5": 0.19.11
+            "6": 4.51.3
+            "8":
+                - 5
+            "12": 0.19.11
+            "13": linux-x86_64
+DownSamplerClass:
+    value: SelectTokenDownsampler
+GaterClass:
+    value: ExactRandomGater
+batch_limit:
+    value: 40000
+batch_print_every:
+    value: 100
+batch_size:
+    value: 4
+downsample_rate:
+    value: 0.25
+early_output_loss_weight:
+    value: 0.2
+effective_batch_size:
+    value: 32
+embedding_dim:
+    value: 384
+gradient_accumulation_steps:
+    value: 2
+learn_gating:
+    value: false
+learning_rate:
+    value: 0.0036
+max_seq_length:
+    value: 4096
+model_size:
+    value: 18M
+n_down_layers:
+    value: 2
+n_mid_layers:
+    value: 6
+n_up_layers:
+    value: 2
+num_epochs:
+    value: 1
+num_heads:
+    value: 6
+seed:
+    value: 42
+sliding_window:
+    value: 64
+total_steps:
+    value: 100
+training_bytes:
+    value: 8.3e+08
+vocab_size:
+    value: 256
+warm_start_steps:
+    value: null
+warmup_bytes:
+    value: 6.2e+07
+warmup_steps:
+    value: 10
