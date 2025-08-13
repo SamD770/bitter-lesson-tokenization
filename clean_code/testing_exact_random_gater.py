@@ -2,47 +2,54 @@ import torch
 
 from clean_code.flexible_bitter_llm import ExactRandomGater, get_merge_dst, SelectTokenDownsampler, gate_first_and_last_tokens
 
-gater = ExactRandomGater(embedding_dim=768, downsample_rate=0.25)
-downsampler = SelectTokenDownsampler()
+for downsample_rate in [1/32, 1/20, 1/16, 1/12, 1/8, 1/6, 1/4, 1/2, 1/2, 1.]:
 
-batch_size = 20
-seq_len = 4096
-embedding_dim = 768
-x = torch.randn(batch_size, seq_len, embedding_dim, device="cuda", dtype=torch.float32) # We need to use float32 for testing this as bfloat16 will lead to rounding errors in computing the below sums:
-position_ids = torch.arange(seq_len, device="cuda", dtype=torch.long).unsqueeze(0).expand(batch_size, -1)
+    print("\n\n")
+    print("-"*50)
+    print(f"{downsample_rate=}")
+    print("-"*50)
+    
+    gater = ExactRandomGater(embedding_dim=768, downsample_rate=downsample_rate)
+    downsampler = SelectTokenDownsampler()
 
-# Performed in forward():
+    batch_size = 20
+    seq_len = 4096
+    embedding_dim = 768
+    x = torch.randn(batch_size, seq_len, embedding_dim, device="cuda", dtype=torch.float32) # We need to use float32 for testing this as bfloat16 will lead to rounding errors in computing the below sums:
+    position_ids = torch.arange(seq_len, device="cuda", dtype=torch.long).unsqueeze(0).expand(batch_size, -1)
 
-gate_logits, gate_probs, gate_samples = gater(x)
+    # Performed in forward():
 
-print(f"{gate_samples.shape=} {gate_samples[:, 0, 0]=}")
-print(f"{gate_samples.sum(dim=1)[:, 0]=}    {gate_samples.sum()=}")
+    gate_logits, gate_probs, gate_samples = gater(x)
 
-gate_samples, gate_probs, gate_logits = gate_first_and_last_tokens(gate_samples, gate_probs, gate_logits)
+    print(f"{gate_samples.shape=} {gate_samples[:, 0, 0]=}")
+    print(f"{gate_samples.sum(dim=1)[:, 0]=}    {gate_samples.sum()=}")
 
-gate_samples = gate_samples.squeeze(-1)
+    gate_samples, gate_probs, gate_logits = gate_first_and_last_tokens(gate_samples, gate_probs, gate_logits)
 
-x_downsampled, position_ids_downsampled, down_merge_dst = downsampler(x, position_ids, gate_samples)
+    gate_samples = gate_samples.squeeze(-1)
 
-# display results:
+    x_downsampled, position_ids_downsampled, down_merge_dst = downsampler(x, position_ids, gate_samples)
 
-print()
-print()
+    # display results:
 
-print(f"{gate_samples[:, 0]=}")
+    print()
+    print()
 
-down_merge_dst, n_dst = get_merge_dst(gate_samples)
-print(f"{n_dst=}")
+    print(f"{gate_samples[:, 0]=}")
 
-print(f"{gate_samples.sum(dim=1)=}    {gate_samples.sum()=}")
-print(f"{(gate_samples.sum(dim=1)==n_dst).all().item()=}")
+    down_merge_dst, n_dst = get_merge_dst(gate_samples)
+    print(f"{n_dst=}")
 
-print(f"{gate_logits.shape=} {gate_probs.shape=} {gate_samples.shape=}")
+    print(f"{gate_samples.sum(dim=1)=}    {gate_samples.sum()=}")
+    print(f"{(gate_samples.sum(dim=1)==n_dst).all().item()=}")
 
-print(f"{x_downsampled.shape=} {position_ids_downsampled.shape=} {down_merge_dst.shape=}")
+    print(f"{gate_logits.shape=} {gate_probs.shape=} {gate_samples.shape=}")
 
-# # Performed in SelectTokenDownsampler:
+    print(f"{x_downsampled.shape=} {position_ids_downsampled.shape=} {down_merge_dst.shape=}")
+
+    # # Performed in SelectTokenDownsampler:
 
 
-# # Merge the tokens into the next token where the gate is 1.)
-# max_n_dst = n_dst.max().item()
+    # # Merge the tokens into the next token where the gate is 1.)
+    # max_n_dst = n_dst.max().item()

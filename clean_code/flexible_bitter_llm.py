@@ -33,7 +33,11 @@ class IndependentWrapperGater(nn.Module):
         super().__init__()
         self.gater = gater
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, downsample_rate=None) -> torch.Tensor:
+
+        if downsample_rate is not None:
+            raise NotImplementedError(f"passed downsample_rate is not implemented for {self.__class__=}")
+
         # Sample gating binary variables for each token.
         gate_logits, gate_probs = self.gater(x)
 
@@ -54,9 +58,13 @@ class ExactRandomGater(nn.Module):
         self.embedding_dim = embedding_dim
         self.downsample_rate = downsample_rate
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, downsample_rate=None) -> torch.Tensor:
         batch_size, seq_len, _ = x.shape
-        num_ones = 1024 # round(seq_len * self.downsample_rate)
+
+        if downsample_rate is None:
+            downsample_rate = self.downsample_rate
+
+        num_ones = round(seq_len * downsample_rate)
 
         # Generate random values for each position
         latents = torch.rand(batch_size, seq_len, 1, device=x.device)
@@ -71,7 +79,7 @@ class ExactRandomGater(nn.Module):
         gate_samples = torch.zeros(batch_size, seq_len, 1, dtype=x.dtype, device=x.device)
         gate_samples.scatter_(1, top_indices, 1)
 
-        gate_probs = torch.ones(batch_size, seq_len, 1, dtype=x.dtype, device=x.device) * self.downsample_rate
+        gate_probs = torch.ones(batch_size, seq_len, 1, dtype=x.dtype, device=x.device) * downsample_rate
         gate_logits = torch.log(gate_probs / (1 - gate_probs))
         return gate_logits, gate_probs, gate_samples
 
@@ -429,7 +437,8 @@ class FlexibleBitterLLM(nn.Module):
             cache_position: torch.Tensor=None,
             past_key_value=None,
             past_gate_samples=None, # TODO: implement
-            use_cache=False
+            use_cache=False,
+            downsample_rate=None
         ) -> torch.Tensor:
         """
         prescribed_down_gate_samples: if provided, use these to gate the down layers.
@@ -448,7 +457,8 @@ class FlexibleBitterLLM(nn.Module):
             cache_position,
             past_key_value,
             past_gate_samples,
-            use_cache
+            use_cache,
+            downsample_rate=downsample_rate
         )
 
         early_logits = self.early_output_layer(x_early_exit)
@@ -475,7 +485,8 @@ class FlexibleBitterLLM(nn.Module):
             cache_position: torch.Tensor=None,
             past_key_value=None,
             past_gate_samples=None, # TODO: implement
-            use_cache=False
+            use_cache=False,
+            downsample_rate=None
         ) -> torch.Tensor:
         """
         Maps embeddings through the residual stream.
@@ -512,7 +523,7 @@ class FlexibleBitterLLM(nn.Module):
         x_early_exit = x
 
         # Sample gating binary variables for each token.
-        down_gate_logits, down_gate_probs, model_down_gate_samples = self.down_layer_gate(x)
+        down_gate_logits, down_gate_probs, model_down_gate_samples = self.down_layer_gate(x, downsample_rate=downsample_rate)
 
         if prescribed_down_gate_samples is None:
             down_gate_samples = model_down_gate_samples
@@ -712,7 +723,7 @@ def in_context_learning_score(next_token_ce, loss_mask, window_size=32, early_in
 
 def off_policy_flexible_training_step(
         model, optimizer, batch, loss_mask, scheduler=None, accelerator=None, learn_gating=True, downsample_rate_target=0.25, consistency_loss_weight=2., discount_rate = 0.9, relative_gating_loss_weight=1., use_off_policy=True, early_output_loss_weight=0.,
-        early_exit_advantage_estimate=False
+        early_exit_advantage_estimate=False, downsample_rate=None
     ):
     """
     Performs a single training step for the model. 
@@ -736,7 +747,7 @@ def off_policy_flexible_training_step(
         prescribed_down_gate_samples = None
 
     with record_function("forward"):
-        out_model = model(batch, prescribed_down_gate_samples=prescribed_down_gate_samples)
+        out_model = model(batch, prescribed_down_gate_samples=prescribed_down_gate_samples, downsample_rate=downsample_rate)
     
     on_policy_probs = out_model["down_gate_probs"]
 
@@ -757,11 +768,18 @@ def off_policy_flexible_training_step(
     early_next_token_cross_entropy = per_token_losses["early_next_token_cross_entropy"]
     next_token_loss_mask = per_token_losses["next_token_loss_mask"]
 
+    # Compute the number of non-padding bytes across all devices for proper scaling of loss when using multi-gpu and gradient accumulation
+    all_bytes = accelerator.reduce(torch.tensor(batch.numel(), device=accelerator.device), reduction="sum").item()
+    non_padding_bytes = accelerator.reduce(loss_mask.sum(), reduction="sum").item()
+
     # For logging: compute the in-context-learning score a la https://transformer-circuits.pub/2022/in-context-learning-and-induction-heads/
     icl_score = in_context_learning_score(next_token_cross_entropy, next_token_loss_mask)
 
-    late_ar_loss = (next_token_cross_entropy).sum() / next_token_loss_mask.sum()
-    early_ar_loss = (early_next_token_cross_entropy).sum() / next_token_loss_mask.sum()
+    # As we're using grad norm clipping (and thus constant factors in front of the loss don't matter modulo numerical precision), 
+    # This is the way to do the backward computation in a way that is consistent with multi-gpu + gradient accumulation. 
+    # For logging, we just rescale by non_padding_bytes/all_bytes
+    late_ar_loss = (next_token_cross_entropy).sum() / all_bytes
+    early_ar_loss = (early_next_token_cross_entropy).sum() / all_bytes
 
     ar_loss = (1 - early_output_loss_weight) * late_ar_loss + early_output_loss_weight * early_ar_loss
     
@@ -776,6 +794,7 @@ def off_policy_flexible_training_step(
         mean_selected_action_cross_entropy = selected_action_cross_entropy.mean()
         
         # Compute the gating loss (such that calling backward() computes the policy gradient).
+        # The fact that we can just ignore masked values means that the loss is properly scaled by the number of non-padding bytes.
         discounted_rewards = torch.cat([discounted_rewards, torch.zeros(batch_size, 1, device=discounted_rewards.device)], dim=-1) # Pad the last reward as zero (the only corresponding action is forced as gating).
         selected_action_log_probs = -selected_action_cross_entropy
         gating_loss = - (selected_action_likelihood_ratios * discounted_rewards * selected_action_log_probs).mean() # Negative as we want to maximise the reward.
@@ -815,10 +834,12 @@ def off_policy_flexible_training_step(
     # total_loss = accelerator.reduce(total_loss, reduction="mean")
     # print(f"rank:{accelerator.process_index} {total_loss.item()=}")
 
+    out_raw = {
+        "all_bytes": all_bytes,
+        "non_padding_bytes": non_padding_bytes,
+    }
+
     out_avg = {
-        "ar_loss": ar_loss,
-        "late_ar_loss": late_ar_loss,
-        "early_ar_loss": early_ar_loss,
         "gating_loss": gating_loss,
         "true_downsample_rate": true_downsample_rate,
         "rate_consistency_loss": down_gate_rate_loss,
@@ -828,13 +849,17 @@ def off_policy_flexible_training_step(
         "in_context_learning_score": icl_score
     }
 
-
     if accelerator is None:
         flops = model.get_num_flops(batch, out_model)
     else:
         flops = model.module.get_num_flops(batch, out_model)
 
+    # Sum the ar_loss across devices as it has been divided by the total number of bytes across all devices.
+    correction_factor = non_padding_bytes/all_bytes
     out_sum = {
+        "ar_loss": ar_loss * correction_factor,
+        "late_ar_loss": late_ar_loss * correction_factor,
+        "early_ar_loss": early_ar_loss * correction_factor,
         "flops": flops,
     }
 
@@ -847,7 +872,7 @@ def off_policy_flexible_training_step(
     for k, v in out_sum.items():
         out_sum[k] = accelerator.reduce(v, reduction="sum").item()
 
-    out = {**out_avg, **out_sum}
+    out = {**out_raw,**out_avg, **out_sum}
 
     return out
 
@@ -1002,12 +1027,10 @@ def flexible_training_loop_warm_start_accelerate(
                     **training_loop_kwargs
                 )
 
-                all_bytes = accelerator.reduce(torch.tensor(batch.numel(), device=accelerator.device), reduction="sum").item()
-                non_padding_bytes = accelerator.reduce(loss_mask.sum(), reduction="sum").item()
                 batch_flops = loss_dict["flops"]
 
-                all_bytes_elapsed += all_bytes
-                non_padding_bytes_elapsed += non_padding_bytes
+                all_bytes_elapsed += loss_dict["all_bytes"]
+                non_padding_bytes_elapsed += loss_dict["non_padding_bytes"]
                 flops_elapsed += batch_flops
 
                 batch_wallclock_time = time.time() - start_time
@@ -1015,8 +1038,6 @@ def flexible_training_loop_warm_start_accelerate(
                 model_flops_utilization = batch_flops / (batch_wallclock_time * gpu_TFLOPS * 1e12)
 
                 loss_dict.update({
-                    "all_bytes": all_bytes,
-                    "non_padding_bytes": non_padding_bytes,
                     "all_bytes_elapsed": all_bytes_elapsed,
                     "non_padding_bytes_elapsed": non_padding_bytes_elapsed,
                     "flops_elapsed": flops_elapsed,
