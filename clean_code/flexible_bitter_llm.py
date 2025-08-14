@@ -5,7 +5,8 @@ This will allow us to use the same code for both on- and off-policy training (th
 
 Also: compatible with the new Gemma2 model implementation in transformers.
 """
-
+import os
+import json
 from copy import deepcopy
 import time
 import numpy as np
@@ -982,6 +983,10 @@ def flexible_training_loop_warm_start_accelerate(
         model, optimizer, lr_scheduler, train_dataloader, accelerator, tokenizer, 
         num_epochs=1, warm_start_steps=None, max_seq_length=1024, batch_print_every=10, print_example_gating=True, 
         batch_limit=None, gradient_accumulation_steps=1,
+        all_bytes_elapsed = 0,
+        non_padding_bytes_elapsed = 0,
+        flops_elapsed = 0,
+        effective_batches_elapsed = 0,
         **training_loop_kwargs
     ):
     """
@@ -992,10 +997,10 @@ def flexible_training_loop_warm_start_accelerate(
     device = accelerator.device
     model = model.to(device)
 
-    all_bytes_elapsed = 0
-    non_padding_bytes_elapsed = 0
-    flops_elapsed = 0
     gpu_TFLOPS = lookup_gpu_TFLOPS()
+
+    starting_batch_count = effective_batches_elapsed * accelerator.gradient_accumulation_steps
+    print(f"Starting batch count: {starting_batch_count}")
 
     # Training loop
     for epoch in range(num_epochs):
@@ -1003,6 +1008,8 @@ def flexible_training_loop_warm_start_accelerate(
         model.train()
 
         for batch_count, batch in enumerate(train_dataloader):
+            batch_count += starting_batch_count
+            
             with accelerator.accumulate(model):
 
                 start_time = time.time()
@@ -1032,6 +1039,8 @@ def flexible_training_loop_warm_start_accelerate(
                 all_bytes_elapsed += loss_dict["all_bytes"]
                 non_padding_bytes_elapsed += loss_dict["non_padding_bytes"]
                 flops_elapsed += batch_flops
+                if batch_count % accelerator.gradient_accumulation_steps == 0:
+                    effective_batches_elapsed += 1
 
                 batch_wallclock_time = time.time() - start_time
 
@@ -1051,5 +1060,59 @@ def flexible_training_loop_warm_start_accelerate(
                 if batch_count % batch_print_every == 0 and accelerator.is_main_process:
                     print(f"{accelerator.device}: Bytes elapsed: {non_padding_bytes_elapsed/1e6:.1f}M ar train loss: {loss_dict['ar_loss']} nats/token selected action ce: {loss_dict['mean_selected_action_ce']:.6f} model flops utilization: {model_flops_utilization:.2%}")
 
-                if batch_limit is not None and batch_count > batch_limit:
+                if (
+                    batch_limit is not None and 
+                    batch_count > batch_limit and 
+                    (batch_count + 1) % accelerator.gradient_accumulation_steps == 0 # ensure we only break at the end of an effective batch
+                ):
                     break
+
+    elapsed_vals = {
+        "all_bytes_elapsed": all_bytes_elapsed,
+        "non_padding_bytes_elapsed": non_padding_bytes_elapsed,
+        "flops_elapsed": flops_elapsed,
+        "effective_batches_elapsed": effective_batches_elapsed
+    }
+
+    return elapsed_vals
+
+
+
+def save_checkpoint(output_dir, accelerator, elapsed_vals):
+    # ensure that the scheduler is registered for checkpointing
+    # elapsed_vals = {
+    #     "all_bytes_elapsed": all_bytes_elapsed,
+    #     "non_padding_bytes_elapsed": non_padding_bytes_elapsed,
+    #     "flops_elapsed": flops_elapsed,
+    #     "effective_batches_elapsed": effective_batches_elapsed
+    # }
+    
+    # save the model, optimizer, scheduler, and the run state
+    accelerator.save_state(output_dir)
+
+    with open(os.path.join(output_dir, "elapsed_vals.json"), "w") as f:
+        json.dump(elapsed_vals, f)
+
+
+def load_checkpoint(input_dir, accelerator, dataloader, effective_batch_size, batch_size):
+    # load the model, optimizer, scheduler, and the run state
+    accelerator.load_state(input_dir)
+
+    with open(os.path.join(input_dir, "elapsed_vals.json"), "r") as f:
+        elapsed_vals = json.load(f)
+
+    effective_batches_elapsed = elapsed_vals["effective_batches_elapsed"]
+
+    step_batch_size = accelerator.num_processes * batch_size
+
+    steps_per_effective_batch = effective_batch_size // step_batch_size # = accelerator.grad_accumulation_steps
+
+    print(f"{steps_per_effective_batch=} {effective_batch_size=} {batch_size=}")
+    assert effective_batch_size % step_batch_size == 0, f"{effective_batch_size=} must be a multiple of the {step_batch_size=}"
+
+    # accelerator.skip_first_batches actually skips steps, not batches or effective batches.
+    steps_to_skip = effective_batches_elapsed * steps_per_effective_batch
+    print(f"Skipping {steps_to_skip} batches")
+    skipped_dataloader = accelerator.skip_first_batches(dataloader, steps_to_skip)
+
+    return skipped_dataloader, elapsed_vals
