@@ -878,116 +878,42 @@ def off_policy_flexible_training_step(
     return out
 
 
-def flexible_training_loop_warm_start(
-        model, train_dataset, tokenizer, learn_gating=True, 
-        num_epochs=1, batch_size=128, batch_limit=None, warm_start_steps=None, max_seq_length=1024, 
-        batch_print_every=10, print_example_gating=True, discount_rate=0.9, relative_gating_loss_weight=1.,
-        downsample_rate_target=0.25, consistency_loss_weight=2., early_output_loss_weight=0., 
-        early_exit_advantage_estimate=False
-    ):
+class CheckpointCondition:
     """
-    DEPRECATED: use the accelerate version instead.
+    A condition for when to checkpoint or stop the training loop.
     """
-
-    # Create data loaders
-    # Create distributed sampler and data loader    
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        num_workers=4,
-        pin_memory=True
-    )
-
-    # See how the model merges a sequence.
-    test_string = train_dataset[-1]["text"][:200]
-    test_batch = tokenizer.encode(test_string, return_tensors="pt", padding=True).cuda()
-
-    # Initialize model and optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-    train_losses = []
-
-    bytes_elapsed = 0
-
-    # Training loop
-    for epoch in range(num_epochs):
-        # Training phase
-        model.train()
-        model = model.cuda()
-
-        print(f"Epoch {epoch+1}/{num_epochs}, GPU usage:")
-        display_gpu_memory()
-
-        for batch_count, batch in enumerate(train_loader):
-
-            if warm_start_steps is not None and batch_count < warm_start_steps:
-                use_off_policy = True
-            else:
-                use_off_policy = False
-
-            batch = batch["text"]
-            batch = tokenizer(batch, return_tensors="pt", padding=True)["input_ids"]
-            batch = batch[:, :max_seq_length]  # Truncate to maximum length of 4096 to save GPU memory.
-            batch = batch.cuda()
-            
-
-            loss_dict = off_policy_flexible_training_step(
-                model, batch, optimizer, 
-                learn_gating=learn_gating, 
-                discount_rate=discount_rate, 
-                relative_gating_loss_weight=relative_gating_loss_weight,
-                consistency_loss_weight=consistency_loss_weight,
-                downsample_rate_target=downsample_rate_target,
-                use_off_policy=use_off_policy,
-                early_output_loss_weight=early_output_loss_weight,
-                early_exit_advantage_estimate=early_exit_advantage_estimate
-            )
-
-            bytes_elapsed += batch.numel()
-            loss_dict["bytes_elapsed"] = bytes_elapsed
-
-            train_losses.append(loss_dict)
-
-            # See if this fixes the OOMing issue.
-            optimizer.zero_grad()
-
-            # Memory tracking for each batch
-            if batch_count % batch_print_every == 0:
-                print(f"Batch {batch_count} ar train loss: {loss_dict['ar_loss']} nats/token selected action ce: {loss_dict['selected_action_ce']}")
-                print(f"Consistency loss: {loss_dict['rate_consistency_loss']} gating loss: {loss_dict['gating_loss']}")
-                if print_example_gating:
-                    with torch.no_grad():
-                        out = model(test_batch)
-
-                        gate_samples = out["down_gate_samples"]
-                        merge_dst = out["down_merge_dst"]
-                        true_rate = gate_samples.float().mean().item()
-                        implied_iid_ce = -true_rate * np.log(true_rate) - (1 - true_rate) * np.log(1 - true_rate)
-
-                        print(f"Downsample rate: {true_rate:4f} implied iid ce: {implied_iid_ce:4f}")
-                        display_gating(test_batch[0], merge_dst[0], tokenizer)
-
-            if batch_limit is not None and batch_count > batch_limit:
-                break
-
-        # Print metrics
-        print(f"Epoch {epoch+1}/{num_epochs}")
-        print(f"Train loss: {np.mean([l['total_loss'] for l in train_losses]):.4f}")
+    def __call__(self, all_bytes_elapsed, non_padding_bytes_elapsed, flops_elapsed, effective_batches_elapsed):
+        """
+        Default implementation: only return True once, the first time when the condition is met.
+        """
+        raise NotImplementedError()
 
 
-    train_losses = pd.DataFrame(train_losses)
-
-    return train_losses
+class BatchLimitCondition(CheckpointCondition):
+    def __init__(self, effective_batch_limit):
+        self.effective_batch_limit = effective_batch_limit
+        
+    def __call__(self, all_bytes_elapsed, non_padding_bytes_elapsed, flops_elapsed, effective_batches_elapsed):
+        return effective_batches_elapsed >= self.effective_batch_limit
 
 
 def flexible_training_loop_warm_start_accelerate(
-        model, optimizer, lr_scheduler, train_dataloader, accelerator, tokenizer, 
-        num_epochs=1, warm_start_steps=None, max_seq_length=1024, batch_print_every=10, print_example_gating=True, 
-        batch_limit=None, gradient_accumulation_steps=1,
+        model, 
+        optimizer, 
+        lr_scheduler, 
+        train_dataloader, 
+        accelerator,
+        tokenizer, 
+        num_epochs=1, 
+        warm_start_steps = None, 
+        max_seq_length = 1024, 
+        batch_print_every = 10,
+        stop_condition: CheckpointCondition = None,
         all_bytes_elapsed = 0,
         non_padding_bytes_elapsed = 0,
         flops_elapsed = 0,
         effective_batches_elapsed = 0,
-        **training_loop_kwargs
+        **training_step_kwargs
     ):
     """
     This is the same as the warm_start_flexible_training_loop, but compatible with the accelerate and wandb libraries. 
@@ -999,22 +925,22 @@ def flexible_training_loop_warm_start_accelerate(
 
     gpu_TFLOPS = lookup_gpu_TFLOPS()
 
-    starting_batch_count = effective_batches_elapsed * accelerator.gradient_accumulation_steps
-    print(f"Starting batch count: {starting_batch_count}")
+    starting_step_count = effective_batches_elapsed * accelerator.gradient_accumulation_steps
+    print(f"Starting step count: {starting_step_count}")
 
     # Training loop
     for epoch in range(num_epochs):
         # Training phase
         model.train()
 
-        for batch_count, batch in enumerate(train_dataloader):
-            batch_count += starting_batch_count
+        for step_count, batch in enumerate(train_dataloader):
+            step_count += starting_step_count
             
             with accelerator.accumulate(model):
 
                 start_time = time.time()
 
-                if warm_start_steps is not None and batch_count < warm_start_steps:
+                if warm_start_steps is not None and step_count < warm_start_steps:
                     use_off_policy = True
                 else:
                     use_off_policy = False
@@ -1030,8 +956,14 @@ def flexible_training_loop_warm_start_accelerate(
                 loss_mask = loss_mask.to(device)
 
                 loss_dict = off_policy_flexible_training_step(
-                    model, optimizer, batch, loss_mask, lr_scheduler, accelerator, use_off_policy=use_off_policy,
-                    **training_loop_kwargs
+                    model, 
+                    optimizer, 
+                    batch, 
+                    loss_mask, 
+                    lr_scheduler, 
+                    accelerator, 
+                    use_off_policy=use_off_policy,
+                    **training_step_kwargs
                 )
 
                 batch_flops = loss_dict["flops"]
@@ -1039,7 +971,8 @@ def flexible_training_loop_warm_start_accelerate(
                 all_bytes_elapsed += loss_dict["all_bytes"]
                 non_padding_bytes_elapsed += loss_dict["non_padding_bytes"]
                 flops_elapsed += batch_flops
-                if batch_count % accelerator.gradient_accumulation_steps == 0:
+
+                if step_count % accelerator.gradient_accumulation_steps == 0:
                     effective_batches_elapsed += 1
 
                 batch_wallclock_time = time.time() - start_time
@@ -1055,15 +988,15 @@ def flexible_training_loop_warm_start_accelerate(
                     "model_flops_utilization": model_flops_utilization
                 })
 
-                accelerator.log(loss_dict, step=batch_count)
+                accelerator.log(loss_dict, step=step_count)
 
-                if batch_count % batch_print_every == 0 and accelerator.is_main_process:
+                if step_count % batch_print_every == 0 and accelerator.is_main_process:
                     print(f"{accelerator.device}: Bytes elapsed: {non_padding_bytes_elapsed/1e6:.1f}M ar train loss: {loss_dict['ar_loss']} nats/token selected action ce: {loss_dict['mean_selected_action_ce']:.6f} model flops utilization: {model_flops_utilization:.2%}")
 
                 if (
-                    batch_limit is not None and 
-                    batch_count > batch_limit and 
-                    (batch_count + 1) % accelerator.gradient_accumulation_steps == 0 # ensure we only break at the end of an effective batch
+                    stop_condition is not None and 
+                    stop_condition(all_bytes_elapsed, non_padding_bytes_elapsed, flops_elapsed, effective_batches_elapsed) and 
+                    (step_count + 1) % accelerator.gradient_accumulation_steps == 0 # ensure we only break at the end of an effective batch
                 ):
                     break
 

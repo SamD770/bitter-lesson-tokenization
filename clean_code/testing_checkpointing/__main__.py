@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 
 from training_random_base_model.hparam_utils import get_model_kwargs
 from clean_code.flexible_bitter_llm import FlexibleBitterLLM, flexible_training_loop_warm_start_accelerate
-from clean_code.flexible_bitter_llm import save_checkpoint, load_checkpoint
+from clean_code.flexible_bitter_llm import save_checkpoint, load_checkpoint, BatchLimitCondition
 
 username = "sdauncey"
 scratch_dir = f"/scratch/{username}/tokenizer_training"
@@ -64,7 +64,7 @@ def init_accelerator(batch_size, gradient_accumulation_steps):
     return accelerator, model, optimizer, scheduler, train_dataloader, elapsed_vals
 
 
-def train_checkpoint(run_name, n_steps):
+def train_checkpoint(run_name, n_effective_batches):
 
     tokenizer = AutoTokenizer.from_pretrained("google/byt5-large")
 
@@ -75,7 +75,7 @@ def train_checkpoint(run_name, n_steps):
     accelerator, model, optimizer, scheduler, train_dataloader, elapsed_vals = \
         init_accelerator(batch_size, gradient_accumulation_steps)
 
-    config = {"run_name": run_name, "n_steps": n_steps}
+    config = {"run_name": run_name, "n_effective_batches": n_effective_batches}
 
     accelerator.init_trackers(
         "testing_checkpointing", 
@@ -101,14 +101,17 @@ def train_checkpoint(run_name, n_steps):
             os.makedirs(run_dir)
 
     elapsed_vals = flexible_training_loop_warm_start_accelerate(
-        model, optimizer, scheduler, train_dataloader, accelerator, tokenizer,
+        model, 
+        optimizer, 
+        scheduler, 
+        train_dataloader, 
+        accelerator, 
+        tokenizer,
         num_epochs=1, 
         warm_start_steps=None, 
         max_seq_length=4096, 
         batch_print_every=1,
-         print_example_gating=True, 
-        batch_limit=n_steps,
-        gradient_accumulation_steps=gradient_accumulation_steps,
+        stop_condition=BatchLimitCondition(n_effective_batches),
         **elapsed_vals
     )
 
@@ -122,7 +125,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--run_name", type=str, required=True)
-    parser.add_argument("--n_steps", type=int, required=True)
+    parser.add_argument("--n_effective_batches", type=int, required=True)
     args = parser.parse_args()
 
-    train_checkpoint(args.run_name, args.n_steps)
+    train_checkpoint(args.run_name, args.n_effective_batches)

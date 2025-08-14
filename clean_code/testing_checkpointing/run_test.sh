@@ -27,11 +27,11 @@ upload_wandb() {
     wandb sync "${RUN_DIR}wandb/latest-run"
 }
 
-accelerate launch --main_process_port 0 -m clean_code.testing_checkpointing --run_name test_run_A --n_steps 13
+accelerate launch --main_process_port 0 -m clean_code.testing_checkpointing --run_name test_run_A --n_effective_batches 7
 upload_wandb
 
-accelerate launch --main_process_port 0 -m clean_code.testing_checkpointing --run_name test_run_A --n_steps 29
+accelerate launch --main_process_port 0 -m clean_code.testing_checkpointing --run_name test_run_A --n_effective_batches 19
 upload_wandb
 
-accelerate launch --main_process_port 0 -m clean_code.testing_checkpointing --run_name test_run_B --n_steps 29
+accelerate launch --main_process_port 0 -m clean_code.testing_checkpointing --run_name test_run_B --n_effective_batches 19
 upload_wandb
