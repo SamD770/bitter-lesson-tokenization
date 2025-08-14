@@ -1,5 +1,6 @@
 __pycache__/experiment_1.cpython-312.pyc
 /old_experiments/
+data/*
 
 *.pt
 *.bin
@@ -19,3 +20,9 @@ __pycache__/experiment_1.cpython-312.pyc
 */wandb/
 
 *.env
+*.bin
+*.safetensors
+*.pkl
+*.json
+*.yaml
+*.txt
