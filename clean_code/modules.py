@@ -189,7 +189,7 @@ class LinearGater(nn.Module):
         down_gate_logits = self.linear(x)
         down_gate_probs = F.sigmoid(down_gate_logits)
         return down_gate_logits, down_gate_probs # We need to return the logits for stable backprop
-    
+
 
 class RandomGater(nn.Module):
     def __init__(self, embedding_dim: int, downsample_rate: float):

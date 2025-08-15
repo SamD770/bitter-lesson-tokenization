@@ -189,6 +189,8 @@ class AverageTokenDownsampler(nn.Module):
         returns:
         x_downsampled.shape = (batch_size, n_dst, embedding_dim)
         position_ids_downsampled.shape = (batch_size, n_dst)
+
+        Warning: this is nondeterministic due to race conditions in scatter_reduce and rounding errors.
         """
         batch_size, _, embedding_dim = x.shape
         down_merge_dst, n_dst = get_merge_dst(down_gate_samples)
@@ -341,12 +343,51 @@ def get_gemma2_attention_mask(input_tensor, cache_position, past_key_value, attn
     return cache_position, attention_mask
 
 
+class DownsampleRateEmbedding(nn.Module):
+    def __init__(self, embedding_dim: int, hidden_dim: int = 32):
+        super().__init__()
+
+        self.backbone = nn.Sequential(
+            nn.Linear(1, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, embedding_dim),
+        )
+
+
+    def forward(self, downsample_rate: float, dtype, device):
+        """
+        returns the downsample rate.
+        """
+
+        downsample_rate = torch.tensor(downsample_rate, dtype=dtype, device=device).unsqueeze(0)
+        embedding = self.backbone(downsample_rate)
+        embedding = embedding.reshape(1, 1, -1) # to broadcast over the batch and sequence dimensions.
+
+        return embedding
+
+
 class FlexibleBitterLLM(nn.Module):
     # Use Gemma2DecoderLayer as a drop in replacement for the TransformerEncoderLayer, with RoPE and sliding window pre-implemented.
     # Also uses a causal mask.
-    def __init__(self, vocab_size: int, embedding_dim: int, num_heads: int, downsample_rate: float = 0.25, sliding_window = 64, down_layer_gate=None,
-                 GaterClass=LinearGater, DownSamplerClass=AverageTokenDownsampler, UpsamplerClass=DistributeTokenUpsampler,
-                 separate_early_output=True, n_down_layers=2, n_mid_layers=6, n_up_layers=2, flash_attn=True, compile=False):
+    def __init__(
+        self, 
+        vocab_size: int,
+        embedding_dim: int, 
+        num_heads: int, 
+        downsample_rate: float = 0.25, 
+        sliding_window = 64, 
+        down_layer_gate=None,
+        GaterClass=LinearGater, 
+        DownSamplerClass=AverageTokenDownsampler, 
+        UpsamplerClass=DistributeTokenUpsampler, 
+        DownsampleRateEmbeddingClass=None,
+        separate_early_output=True, 
+        n_down_layers=2, 
+        n_mid_layers=6, 
+        n_up_layers=2, 
+        flash_attn=True, 
+        compile=False
+    ):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
@@ -407,7 +448,13 @@ class FlexibleBitterLLM(nn.Module):
         else:
             self.down_layer_gate = down_layer_gate
 
-        self.downsample_rate = downsample_rate
+        self._downsample_rate = downsample_rate
+
+        if DownsampleRateEmbeddingClass is not None:
+            self.downsample_rate_embedding = DownsampleRateEmbeddingClass(embedding_dim)
+        else:
+            self.downsample_rate_embedding = None
+
         self.downsampler = DownSamplerClass()
         self.upsampler = UpsamplerClass()
         self.rotary_emb = Gemma2RotaryEmbedding(config=self.byte_layer_config)
@@ -446,7 +493,6 @@ class FlexibleBitterLLM(nn.Module):
         down_gate_mask: if provided, use this to mask the down layers.
         cache_position: if provided, use this to update the KV cache.
         """
-
 
         x = self.embedding(input_ids)
 
@@ -503,10 +549,13 @@ class FlexibleBitterLLM(nn.Module):
             input_tensor=x,
             cache_position=cache_position,
             past_key_value=past_key_value,
-            attn_implementation=self.attn_implementation
+            attn_implementation=self._attn_implementation
         )
 
         position_embeddings = self.rotary_emb(x, position_ids)
+
+        if self.downsample_rate_embedding is not None:
+            x = x + self.downsample_rate_embedding(downsample_rate, x.dtype, x.device)
 
         # Apply down layers to byte tokens        
         for layer in self.down_layers:
@@ -613,8 +662,8 @@ class FlexibleBitterLLM(nn.Module):
         total_flops = byte_level_flops + mid_layer_flops
 
         return total_flops
-    
-    
+
+        
     @property
     def attn_implementation(self):
         return getattr(self, '_attn_implementation', None)
@@ -626,6 +675,7 @@ class FlexibleBitterLLM(nn.Module):
         # All layers contain references to these config objects:
         self.byte_layer_config._attn_implementation = attn_implementation
         self.deep_layer_config._attn_implementation = attn_implementation
+
 
 
 def select_next_token_cross_entropy(logits, next_token_ids, next_token_loss_mask):
