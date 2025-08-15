@@ -20,7 +20,7 @@ from torch.profiler import record_function
 
 # TODO: migrate some things from bitter_llm.py to utils.py
 from .utils import display_gpu_memory, display_gating, count_parameters, lookup_gpu_TFLOPS
-from .bitter_llm import LinearGater, RandomGater, EquidistantGater, AverageTokenDownsampler, get_merge_dst, create_gemma2DecoderLayer, discounted_rewards_torch
+from .modules import LinearGater, RandomGater, EquidistantGater, AverageTokenDownsampler, get_merge_dst, create_gemma2DecoderLayer, discounted_rewards_torch
 from .conditional_sequential import SequentiallyDependentRandomGater
 from transformers.models.gemma2.modeling_gemma2 import Gemma2Model, Gemma2Config, Gemma2RotaryEmbedding, HybridCache, StaticCache, Cache
 
@@ -626,9 +626,6 @@ class FlexibleBitterLLM(nn.Module):
         # All layers contain references to these config objects:
         self.byte_layer_config._attn_implementation = attn_implementation
         self.deep_layer_config._attn_implementation = attn_implementation
-
-
-
 
 
 def select_next_token_cross_entropy(logits, next_token_ids, next_token_loss_mask):
