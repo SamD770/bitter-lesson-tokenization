@@ -771,7 +771,8 @@ def in_context_learning_score(next_token_ce, loss_mask, window_size=32, early_in
 
 def off_policy_flexible_training_step(
         model, optimizer, batch, loss_mask, scheduler=None, accelerator=None, learn_gating=True, downsample_rate_target=0.25, consistency_loss_weight=2., discount_rate = 0.9, relative_gating_loss_weight=1., use_off_policy=True, early_output_loss_weight=0.,
-        early_exit_advantage_estimate=False, downsample_rate=None
+        early_exit_advantage_estimate=False, downsample_rate=None, 
+        do_backward_pass=True
     ):
     """
     Performs a single training step for the model. 
@@ -785,7 +786,6 @@ def off_policy_flexible_training_step(
 
     batch_size, _ = batch.shape
 
-    optimizer.zero_grad()
 
     if use_off_policy:
         # For now: only consider Random gating
@@ -864,19 +864,23 @@ def off_policy_flexible_training_step(
 
     with record_function("backward"):
         # Optimizer step
-        if accelerator is None:
-            total_loss.backward()
-            pre_clip_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        if do_backward_pass:
+            if accelerator is None:
+                total_loss.backward()
+                pre_clip_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            else:
+                accelerator.backward(total_loss)
+                pre_clip_grad_norm = accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
+            optimizer.step()
+
+            if scheduler is not None:
+                scheduler.step()
+
+            optimizer.zero_grad()
+
         else:
-            accelerator.backward(total_loss)
-            pre_clip_grad_norm = accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        
-        optimizer.step()
-
-        if scheduler is not None:
-            scheduler.step()
-
-        optimizer.zero_grad()
+            pre_clip_grad_norm = torch.tensor(0.0, device=accelerator.device)
 
     # print(f"rank:{accelerator.process_index} {total_loss.item()=}")
     # total_loss = accelerator.reduce(total_loss, reduction="mean")
@@ -897,7 +901,7 @@ def off_policy_flexible_training_step(
         "in_context_learning_score": icl_score
     }
 
-    if accelerator is None:
+    if accelerator is None or accelerator.num_processes == 1:
         flops = model.get_num_flops(batch, out_model)
     else:
         flops = model.module.get_num_flops(batch, out_model)
@@ -944,17 +948,53 @@ class BatchLimitCondition(CheckpointCondition):
         return effective_batches_elapsed >= self.effective_batch_limit
 
 
+def text_to_tensor(batch, tokenizer, max_seq_length, device):
+    batch_text = batch["text"]
+    tokenized = tokenizer(batch_text, return_tensors="pt", padding=True, add_special_tokens=True)
+    loss_mask = tokenized["attention_mask"]
+    batch = tokenized["input_ids"]
+
+    # Truncate to maximum length of 4096 to save GPU memory.
+    batch = batch[:, :max_seq_length]  
+    loss_mask = loss_mask[:, :max_seq_length]
+    batch = batch.to(device)
+    loss_mask = loss_mask.to(device)
+
+    return batch, loss_mask
+
+
+def aggregate_val_metrics(val_metrics):
+    """
+    Aggregate the validation metrics batches.
+    """
+    val_keys = [
+        "gating_loss", "true_downsample_rate", "rate_consistency_loss", "total_loss", 
+        "mean_selected_action_ce", "in_context_learning_score", 
+        "ar_loss", "late_ar_loss", "early_ar_loss"
+    ]
+    aggregated_val_metrics = {}
+
+    for k in val_keys:
+        k_val = "val_" + k
+        aggregated_val_metrics[k_val] = sum([batch[k] for batch in val_metrics]) / len(val_metrics)
+    
+    return aggregated_val_metrics
+
+
+
 def flexible_training_loop_warm_start_accelerate(
         model, 
         optimizer, 
         lr_scheduler, 
         train_dataloader, 
+        val_dataloader,
         accelerator,
         tokenizer, 
         num_epochs=1, 
         warm_start_steps = None, 
         max_seq_length = 1024, 
-        batch_print_every = 10,
+        step_print_every = 10,
+        validate_every = 100,
         stop_condition: CheckpointCondition = None,
         all_bytes_elapsed = 0,
         non_padding_bytes_elapsed = 0,
@@ -977,12 +1017,36 @@ def flexible_training_loop_warm_start_accelerate(
 
     # Training loop
     for epoch in range(num_epochs):
-        # Training phase
-        model.train()
 
         for step_count, batch in enumerate(train_dataloader):
             step_count += starting_step_count
+
+            # Validation phase
+            if effective_batches_elapsed % validate_every == 0 and step_count % accelerator.gradient_accumulation_steps == 0:
+                model.eval()
+                with torch.no_grad():
+                    print(f"Validating at step {step_count}")
+                    val_metrics = []
+                    for val_batch in val_dataloader:
+                        val_batch, loss_mask = text_to_tensor(val_batch, tokenizer, max_seq_length, device)
+                        val_loss_dict = off_policy_flexible_training_step(
+                            model, 
+                            optimizer, 
+                            val_batch, 
+                            loss_mask, 
+                            lr_scheduler, 
+                            accelerator, 
+                            use_off_policy=False,
+                            do_backward_pass=False,
+                            **training_step_kwargs
+                        )
+                        val_metrics.append(val_loss_dict)
+
+                    val_loss_dict = aggregate_val_metrics(val_metrics)
+                    accelerator.log(val_loss_dict, step=step_count)
             
+            #Training phase
+            model.train()
             with accelerator.accumulate(model):
 
                 start_time = time.time()
@@ -991,16 +1055,8 @@ def flexible_training_loop_warm_start_accelerate(
                     use_off_policy = True
                 else:
                     use_off_policy = False
-                    
-                batch_text = batch["text"]
-                tokenized = tokenizer(batch_text, return_tensors="pt", padding=True)
-                loss_mask = tokenized["attention_mask"]
-                batch = tokenized["input_ids"]
 
-                batch = batch[:, :max_seq_length]  # Truncate to maximum length of 4096 to save GPU memory.
-                loss_mask = loss_mask[:, :max_seq_length]
-                batch = batch.to(device)
-                loss_mask = loss_mask.to(device)
+                batch, loss_mask = text_to_tensor(batch, tokenizer, max_seq_length, device)
 
                 loss_dict = off_policy_flexible_training_step(
                     model, 
@@ -1037,7 +1093,7 @@ def flexible_training_loop_warm_start_accelerate(
 
                 accelerator.log(loss_dict, step=step_count)
 
-                if step_count % batch_print_every == 0 and accelerator.is_main_process:
+                if step_count % step_print_every == 0 and accelerator.is_main_process:
                     print(f"{accelerator.device}: Bytes elapsed: {non_padding_bytes_elapsed/1e6:.1f}M ar train loss: {loss_dict['ar_loss']} nats/token selected action ce: {loss_dict['mean_selected_action_ce']:.6f} model flops utilization: {model_flops_utilization:.2%}")
 
                 if (

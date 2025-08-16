@@ -110,7 +110,7 @@ def train_checkpoint(run_name, n_effective_batches):
         num_epochs=1, 
         warm_start_steps=None, 
         max_seq_length=4096, 
-        batch_print_every=1,
+        step_print_every=1,
         stop_condition=BatchLimitCondition(n_effective_batches),
         **elapsed_vals
     )
