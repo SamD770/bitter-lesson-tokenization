@@ -23,6 +23,7 @@ from .utils import display_gpu_memory, display_gating, count_parameters, lookup_
 from .modules import LinearGater, RandomGater, EquidistantGater, AverageTokenDownsampler, get_merge_dst, create_gemma2DecoderLayer, discounted_rewards_torch
 from .conditional_sequential import SequentiallyDependentRandomGater
 from transformers.models.gemma2.modeling_gemma2 import Gemma2Model, Gemma2Config, Gemma2RotaryEmbedding, HybridCache, StaticCache, Cache
+from .downsample_rate_scheduler import DefaultDownsampleRateScheduler
 
 from typing import Optional, Dict, Union, List
 
@@ -770,8 +771,21 @@ def in_context_learning_score(next_token_ce, loss_mask, window_size=32, early_in
 
 
 def off_policy_flexible_training_step(
-        model, optimizer, batch, loss_mask, scheduler=None, accelerator=None, learn_gating=True, downsample_rate_target=0.25, consistency_loss_weight=2., discount_rate = 0.9, relative_gating_loss_weight=1., use_off_policy=True, early_output_loss_weight=0.,
-        early_exit_advantage_estimate=False, downsample_rate=None, 
+        model, 
+        optimizer, 
+        batch, 
+        loss_mask, 
+        scheduler=None, 
+        accelerator=None, 
+        learn_gating=True, 
+        downsample_rate_target=0.25, 
+        downsample_rate=None, 
+        consistency_loss_weight=2., 
+        discount_rate = 0.9, 
+        relative_gating_loss_weight=1., 
+        use_off_policy=True, 
+        early_output_loss_weight=0.,
+        early_exit_advantage_estimate=False, 
         do_backward_pass=True
     ):
     """
@@ -818,16 +832,14 @@ def off_policy_flexible_training_step(
 
     # Compute the number of non-padding bytes across all devices for proper scaling of loss when using multi-gpu and gradient accumulation
     all_bytes = accelerator.reduce(torch.tensor(batch.numel(), device=accelerator.device), reduction="sum").item()
-    non_padding_bytes = accelerator.reduce(loss_mask.sum(), reduction="sum").item()
+    non_padding_bytes_batch = loss_mask.sum()
+    non_padding_bytes = accelerator.reduce(non_padding_bytes_batch, reduction="sum").item()
 
     # For logging: compute the in-context-learning score a la https://transformer-circuits.pub/2022/in-context-learning-and-induction-heads/
     icl_score = in_context_learning_score(next_token_cross_entropy, next_token_loss_mask)
 
-    # As we're using grad norm clipping (and thus constant factors in front of the loss don't matter modulo numerical precision), 
-    # This is the way to do the backward computation in a way that is consistent with multi-gpu + gradient accumulation. 
-    # For logging, we just rescale by non_padding_bytes/all_bytes
-    late_ar_loss = (next_token_cross_entropy).sum() / all_bytes
-    early_ar_loss = (early_next_token_cross_entropy).sum() / all_bytes
+    late_ar_loss = (next_token_cross_entropy).sum() / non_padding_bytes_batch
+    early_ar_loss = (early_next_token_cross_entropy).sum() / non_padding_bytes_batch
 
     ar_loss = (1 - early_output_loss_weight) * late_ar_loss + early_output_loss_weight * early_ar_loss
     
@@ -852,7 +864,6 @@ def off_policy_flexible_training_step(
         down_gate_rate_loss = consistency_loss_weight*(downsample_rate_target - true_downsample_rate) **2
 
         total_loss = ar_loss + gating_loss + down_gate_rate_loss
-
     else:
         # For logging purposes set these to zero.
         gating_loss = torch.tensor(0.0, device=accelerator.device)
@@ -882,10 +893,6 @@ def off_policy_flexible_training_step(
         else:
             pre_clip_grad_norm = torch.tensor(0.0, device=accelerator.device)
 
-    # print(f"rank:{accelerator.process_index} {total_loss.item()=}")
-    # total_loss = accelerator.reduce(total_loss, reduction="mean")
-    # print(f"rank:{accelerator.process_index} {total_loss.item()=}")
-
     out_raw = {
         "all_bytes": all_bytes,
         "non_padding_bytes": non_padding_bytes,
@@ -896,6 +903,9 @@ def off_policy_flexible_training_step(
         "true_downsample_rate": true_downsample_rate,
         "rate_consistency_loss": down_gate_rate_loss,
         "total_loss": total_loss,
+        "ar_loss": ar_loss,
+        "late_ar_loss": late_ar_loss,
+        "early_ar_loss": early_ar_loss,
         "mean_selected_action_ce": mean_selected_action_cross_entropy,
         "pre_clip_grad_norm": pre_clip_grad_norm,
         "in_context_learning_score": icl_score
@@ -905,13 +915,8 @@ def off_policy_flexible_training_step(
         flops = model.get_num_flops(batch, out_model)
     else:
         flops = model.module.get_num_flops(batch, out_model)
-
-    # Sum the ar_loss across devices as it has been divided by the total number of bytes across all devices.
-    correction_factor = non_padding_bytes/all_bytes
+        
     out_sum = {
-        "ar_loss": ar_loss * correction_factor,
-        "late_ar_loss": late_ar_loss * correction_factor,
-        "early_ar_loss": early_ar_loss * correction_factor,
         "flops": flops,
     }
 
@@ -981,7 +986,6 @@ def aggregate_val_metrics(val_metrics):
     return aggregated_val_metrics
 
 
-
 def flexible_training_loop_warm_start_accelerate(
         model, 
         optimizer, 
@@ -989,7 +993,9 @@ def flexible_training_loop_warm_start_accelerate(
         train_dataloader, 
         val_dataloader,
         accelerator,
-        tokenizer, 
+        tokenizer,
+        downsample_rate_target=0.25, 
+        downsample_rate_schedule=None,
         num_epochs=1, 
         warm_start_steps = None, 
         max_seq_length = 1024, 
@@ -1003,8 +1009,10 @@ def flexible_training_loop_warm_start_accelerate(
         **training_step_kwargs
     ):
     """
-    This is the same as the warm_start_flexible_training_loop, but compatible with the accelerate and wandb libraries. 
+    This is the main training loop, compatible with the accelerate and wandb libraries. 
     The wrapping of model, dataloader, optimizer should be done before passing to this function. 
+
+
     """
 
     device = accelerator.device
@@ -1015,6 +1023,9 @@ def flexible_training_loop_warm_start_accelerate(
     starting_step_count = effective_batches_elapsed * accelerator.gradient_accumulation_steps
     print(f"Starting step count: {starting_step_count}")
 
+    if downsample_rate_schedule is None:
+        downsample_rate_schedule = DefaultDownsampleRateScheduler(downsample_rate_target)
+
     # Training loop
     for epoch in range(num_epochs):
 
@@ -1023,6 +1034,9 @@ def flexible_training_loop_warm_start_accelerate(
 
             # Validation phase
             if effective_batches_elapsed % validate_every == 0 and step_count % accelerator.gradient_accumulation_steps == 0:
+                
+                val_downsample_rate, val_downsample_rate_target = downsample_rate_schedule.val_step()
+
                 model.eval()
                 with torch.no_grad():
                     print(f"Validating at step {step_count}")
@@ -1038,13 +1052,22 @@ def flexible_training_loop_warm_start_accelerate(
                             accelerator, 
                             use_off_policy=False,
                             do_backward_pass=False,
+                            downsample_rate=val_downsample_rate,
+                            downsample_rate_target=val_downsample_rate_target,
                             **training_step_kwargs
                         )
                         val_metrics.append(val_loss_dict)
 
                     val_loss_dict = aggregate_val_metrics(val_metrics)
+                    val_loss_dict.update({
+                        "val_downsample_rate": val_downsample_rate,
+                        "val_downsample_rate_target": val_downsample_rate_target,
+                    })
                     accelerator.log(val_loss_dict, step=step_count)
             
+            if step_count % accelerator.gradient_accumulation_steps == 0:
+                downsample_rate, downsample_rate_target = downsample_rate_schedule.step()
+
             #Training phase
             model.train()
             with accelerator.accumulate(model):
@@ -1066,6 +1089,8 @@ def flexible_training_loop_warm_start_accelerate(
                     lr_scheduler, 
                     accelerator, 
                     use_off_policy=use_off_policy,
+                    downsample_rate=downsample_rate,
+                    downsample_rate_target=downsample_rate_target,
                     **training_step_kwargs
                 )
 
@@ -1083,6 +1108,8 @@ def flexible_training_loop_warm_start_accelerate(
                 model_flops_utilization = batch_flops / (batch_wallclock_time * gpu_TFLOPS * 1e12)
 
                 loss_dict.update({
+                    "downsample_rate": downsample_rate,
+                    "downsample_rate_target": downsample_rate_target,
                     "all_bytes_elapsed": all_bytes_elapsed,
                     "non_padding_bytes_elapsed": non_padding_bytes_elapsed,
                     "flops_elapsed": flops_elapsed,
@@ -1094,7 +1121,7 @@ def flexible_training_loop_warm_start_accelerate(
                 accelerator.log(loss_dict, step=step_count)
 
                 if step_count % step_print_every == 0 and accelerator.is_main_process:
-                    print(f"{accelerator.device}: Bytes elapsed: {non_padding_bytes_elapsed/1e6:.1f}M ar train loss: {loss_dict['ar_loss']} nats/token selected action ce: {loss_dict['mean_selected_action_ce']:.6f} model flops utilization: {model_flops_utilization:.2%}")
+                    print(f"{accelerator.device}: Bytes elapsed: {non_padding_bytes_elapsed/1e6:.1f}M ar train ar loss: {loss_dict['ar_loss']} nats/token batch time: {batch_wallclock_time:.2f}s model flops utilization: {model_flops_utilization:.2%}")
 
                 if (
                     stop_condition is not None and 
@@ -1102,6 +1129,8 @@ def flexible_training_loop_warm_start_accelerate(
                     (step_count + 1) % accelerator.gradient_accumulation_steps == 0 # ensure we only break at the end of an effective batch
                 ):
                     break
+
+                exit()
 
     elapsed_vals = {
         "all_bytes_elapsed": all_bytes_elapsed,
