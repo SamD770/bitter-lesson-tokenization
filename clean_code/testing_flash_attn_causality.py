@@ -1,5 +1,5 @@
 from .flexible_bitter_llm import FlexibleBitterLLM, ExactRandomGater
-from .bitter_llm import get_gemma2_attention_mask
+from .modules import get_gemma2_attention_mask
 from transformers.models.gemma2.modeling_gemma2 import Gemma2Config, Gemma2DecoderLayer, Gemma2Attention, Gemma2RotaryEmbedding
 import torch
 

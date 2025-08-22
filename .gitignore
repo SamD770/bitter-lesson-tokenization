@@ -26,3 +26,4 @@ data/*
 *.json
 *.yaml
 *.txt
+*.scratch_clean_remove_empty

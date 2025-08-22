@@ -7,7 +7,7 @@ from clean_code.utils import parameter_count_string
 model_sizes = ["18M", "32M", "73M", "130M", "346M"]
 
 fixed_model_hparams = {
-    "vocab_size": 256,
+    "vocab_size": 320, # This is the len() of the evabyte tokenizer.
     "downsample_rate": 0.25,
     "sliding_window": 64,
     "GaterClass": ExactRandomGater,
@@ -15,6 +15,13 @@ fixed_model_hparams = {
 }
 
 variable_model_hparam_dict  = {
+    "XM": {
+        "embedding_dim": 256,
+        "num_heads": 6,
+        "n_down_layers": 2,
+        "n_mid_layers": 4,
+        "n_up_layers": 2,
+    },
     "18M": {
         "embedding_dim": 384,
         "num_heads": 6,
@@ -50,6 +57,15 @@ variable_model_hparam_dict  = {
         "n_mid_layers": 20,
         "n_up_layers": 2,
     },
+}
+
+training_loop_hparam_defaults = {
+    "num_epochs": 1, 
+    "max_seq_length": 4096,
+    "step_print_every": 100, 
+    "validate_every": 100,
+    "warm_start_steps": None,
+    "learn_gating": NotImplementedError,
 }
 
 # According to https://arxiv.org/pdf/2406.19146, we want to use:

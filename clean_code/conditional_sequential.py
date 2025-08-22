@@ -9,9 +9,11 @@ class SequentialyDependentGater(nn.Module):
         self.embedding_dim = embedding_dim
         self.filter_size = filter_size
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, downsample_rate: float) -> torch.Tensor:
         """
-        Computes the conditional probablilities and samples from them. Returns:
+        Computes the conditional probablilities and samples from them.
+        WARNING: For now, the downsample rate is ignored.
+        Returns:
         gate_logits[i]: log_p(gate_samples[i] | gate_samples[:i])
         gate_probs[i]: p(gate_samples[i] | gate_samples[:i])
         gate_samples[i]

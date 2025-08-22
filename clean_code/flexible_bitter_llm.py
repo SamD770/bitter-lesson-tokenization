@@ -783,7 +783,7 @@ def off_policy_flexible_training_step(
         consistency_loss_weight=2., 
         discount_rate = 0.9, 
         relative_gating_loss_weight=1., 
-        use_off_policy=True, 
+        use_off_policy=False, 
         early_output_loss_weight=0.,
         early_exit_advantage_estimate=False, 
         do_backward_pass=True
@@ -951,6 +951,14 @@ class BatchLimitCondition(CheckpointCondition):
         
     def __call__(self, all_bytes_elapsed, non_padding_bytes_elapsed, flops_elapsed, effective_batches_elapsed):
         return effective_batches_elapsed >= self.effective_batch_limit
+
+
+class BytesLimitCondition(CheckpointCondition):
+    def __init__(self, bytes_limit):
+        self.bytes_limit = bytes_limit
+        
+    def __call__(self, all_bytes_elapsed, non_padding_bytes_elapsed, flops_elapsed, effective_batches_elapsed):
+        return non_padding_bytes_elapsed >= self.bytes_limit
 
 
 def text_to_tensor(batch, tokenizer, max_seq_length, device):
@@ -1129,8 +1137,6 @@ def flexible_training_loop_warm_start_accelerate(
                     (step_count + 1) % accelerator.gradient_accumulation_steps == 0 # ensure we only break at the end of an effective batch
                 ):
                     break
-
-                exit()
 
     elapsed_vals = {
         "all_bytes_elapsed": all_bytes_elapsed,
