@@ -1,6 +1,7 @@
 __pycache__/experiment_1.cpython-312.pyc
 /old_experiments/
 data/*
+plots/renders/*
 
 *.pt
 *.bin
