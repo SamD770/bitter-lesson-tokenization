@@ -69,7 +69,6 @@ def main():
 
         all_gate_probs.append(real_gate_probs)
 
-
         per_token_losses = per_token_losses_backbone(
             batch, 
             loss_mask, 
@@ -78,6 +77,7 @@ def main():
             learn_gating=True,
             early_exit_advantage_estimate=True
         )
+        # TODO: use gpt2 tokenizer to see the equivalent "gate probs"
 
         next_token_cross_entropies.append(per_token_losses["next_token_cross_entropy"])
         early_next_token_cross_entropies.append(per_token_losses["early_next_token_cross_entropy"])
@@ -93,9 +93,11 @@ def main():
     mean_early_next_token_cross_entropy = early_next_token_cross_entropies.mean(dim=0)
     mean_gate_probs = all_gate_probs.to(torch.float32).mean(dim=0) # Upcast to float32 for plotting granularity etc.
 
-    # discard the first gate for plotting as it is fixed to 1.
-    print(f"{mean_gate_probs[:100]=}") # Verify that it is not a bug that the second gate is also quite high. 
-    mean_gate_probs = mean_gate_probs[1:] 
+    # Discard the first and last gate for plotting as they are fixed to 1.
+    # Verify that it is not a bug that the second gate is also quite high.
+    print(f"{mean_gate_probs[:50]=}")  
+    print(f"{mean_gate_probs[-50:]=}")
+    mean_gate_probs = mean_gate_probs[1:-1] 
 
     mean_next_token_cross_entropy = mean_next_token_cross_entropy.cpu().numpy()
     mean_early_next_token_cross_entropy = mean_early_next_token_cross_entropy.cpu().numpy()
@@ -124,16 +126,26 @@ def main():
     plt.legend()
     plt.savefig("plots/renders/next_token_cross_entropy_over_time.png")
 
-
     # Plot the gate probs over time.
-    plt.figure(figsize=(10, 5))
-    plt.plot(mean_gate_probs, label='Gate Probs', alpha=0.2)
-    smoothed_gate_probs = smooth(mean_gate_probs)
-    plt.plot(range(len(mean_gate_probs) - len(smoothed_gate_probs), len(mean_gate_probs)), 
-             smoothed_gate_probs, label='Gate Probs (Smoothed)', alpha=1.0)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 5))
     
+    # Panel 1: Full limits
+    ax1.plot(mean_gate_probs, label='Gate Probs', alpha=0.2)
+    smoothed_gate_probs = smooth(mean_gate_probs)
+    ax1.plot(range(len(mean_gate_probs) - len(smoothed_gate_probs), len(mean_gate_probs)), 
+             smoothed_gate_probs, label='Gate Probs (Smoothed)', alpha=1.0)
+    ax1.legend()
+    ax1.set_title('Gate Probs Over Time (Full Range)')
+    
+    # Panel 2: Limited y-axis between 0.23 and 0.35
+    ax2.plot(mean_gate_probs, label='Gate Probs', alpha=0.2)
+    ax2.plot(range(len(mean_gate_probs) - len(smoothed_gate_probs), len(mean_gate_probs)), 
+             smoothed_gate_probs, label='Gate Probs (Smoothed)', alpha=1.0)
+    ax2.set_ylim(0.23, 0.35)
+    ax2.legend()
+    ax2.set_title('Gate Probs Over Time (0.23-0.35)')
 
-    plt.legend()
+    plt.tight_layout()
     plt.savefig("plots/renders/gate_probs_over_time.png")
 
 
