@@ -28,3 +28,4 @@ plots/renders/*
 *.yaml
 *.txt
 *.scratch_clean_remove_empty
+*.parquet
