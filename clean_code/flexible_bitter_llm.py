@@ -82,7 +82,8 @@ class ExactRandomGater(nn.Module):
         gate_samples.scatter_(1, top_indices, 1)
 
         gate_probs = torch.ones(batch_size, seq_len, 1, dtype=x.dtype, device=x.device) * downsample_rate
-        gate_logits = torch.log(gate_probs / (1 - gate_probs))
+        # take the inverse sigmoid of the probability to get the logits
+        gate_logits = torch.log(gate_probs / (1 - gate_probs)) 
         return gate_logits, gate_probs, gate_samples
 
 
