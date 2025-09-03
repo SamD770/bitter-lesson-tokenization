@@ -104,6 +104,7 @@ def downsample_without_null_group(boundaries, hidden):
 
     bar = nawrot_downsampler.final(foo=foo, upsample=False)  # B x L x S
 
+
     foo = foo.to(hidden.dtype)
     bar = bar.to(hidden.dtype)
 
@@ -151,6 +152,7 @@ def common_without_null_group(boundaries, upsample=False):
         hh1 -= boundaries
 
     foo = tmp - hh1.unsqueeze(-1)
+    foo = foo + 1 # This is the correction necessary to make the model causal.
 
     return foo
 
