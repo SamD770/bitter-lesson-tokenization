@@ -36,9 +36,11 @@ class IndependentWrapperGater(nn.Module):
         self.gater = gater
 
     def forward(self, x: torch.Tensor, downsample_rate=None) -> torch.Tensor:
-
-        if downsample_rate is not None:
-            raise NotImplementedError(f"passed downsample_rate is not implemented for {self.__class__=}")
+        """
+        Values are defined as so:
+        gate_probs[b, s] = sigmoid(gate_logits[b, s])
+        gate_samples[b, s] ~ bernoulli(gate_probs[b, s]) i.i.d. for all b, s.
+        """
 
         # Sample gating binary variables for each token.
         gate_logits, gate_probs = self.gater(x)
@@ -559,23 +561,27 @@ class FlexibleBitterLLM(nn.Module):
         if self.downsample_rate_embedding is not None:
             x = x + self.downsample_rate_embedding(downsample_rate, x.dtype, x.device)
 
-        # Apply down layers to byte tokens        
-        for layer in self.down_layers:
-            x = layer(
-                x,
-                position_embeddings,
-                attention_mask=byte_attention_mask,
-                position_ids=position_ids,
-                cache_position=byte_cache_position,
-                past_key_value=past_key_value,
-                use_cache=use_cache
-            )[0]
+
+        with record_function("down_layers"):
+
+            # Apply down layers to byte tokens        
+            for layer in self.down_layers:
+                x = layer(
+                    x,
+                    position_embeddings,
+                    attention_mask=byte_attention_mask,
+                    position_ids=position_ids,
+                    cache_position=byte_cache_position,
+                    past_key_value=past_key_value,
+                    use_cache=use_cache
+                )[0]
 
         # Save x for computing the early exit logits.
         x_early_exit = x
 
         # Sample gating binary variables for each token.
-        down_gate_logits, down_gate_probs, model_down_gate_samples = self.down_layer_gate(x, downsample_rate=downsample_rate)
+        with record_function("down_layer_gate"):
+            down_gate_logits, down_gate_probs, model_down_gate_samples = self.down_layer_gate(x, downsample_rate=downsample_rate)
 
         if prescribed_down_gate_samples is None:
             down_gate_samples = model_down_gate_samples
@@ -588,10 +594,13 @@ class FlexibleBitterLLM(nn.Module):
         # Hack: ensure that we always gate on the first token:
         down_gate_samples, down_gate_probs, down_gate_logits = gate_first_and_last_tokens(down_gate_samples, down_gate_probs, down_gate_logits)
 
-        # Merge the tokens into the next token where the gate is 1.
-        down_gate_samples = down_gate_samples.squeeze(-1)
-        x_downsampled, position_ids_downsampled, down_merge_dst = self.downsampler(x, position_ids, down_gate_samples)
-        max_n_dst = x_downsampled.shape[1]
+        with record_function("downsampler"):
+
+            # Merge the tokens into the next token where the gate is 1.
+            down_gate_samples = down_gate_samples.squeeze(-1)
+            x_downsampled, position_ids_downsampled, down_merge_dst = self.downsampler(x, position_ids, down_gate_samples)
+            max_n_dst = x_downsampled.shape[1]
+
 
         # Apply mid layers to merged tokens and compute the deviation
         downsampled_cache_position, downsampled_attention_mask = get_gemma2_attention_mask(
@@ -606,35 +615,37 @@ class FlexibleBitterLLM(nn.Module):
 
         y_downsampled = x_downsampled
 
-        position_embeddings_downsampled = self.rotary_emb(x_downsampled, position_ids_downsampled)
-        for layer in self.mid_layers:
-            y_downsampled = layer(
-                y_downsampled,
-                position_embeddings_downsampled,
-                attention_mask=downsampled_attention_mask,
-                position_ids=position_ids_downsampled,
-                cache_position=downsampled_cache_position,
-                past_key_value=past_key_value,
-                use_cache=use_cache
-            )[0]
-        
+        with record_function("mid_layers"):
+            position_embeddings_downsampled = self.rotary_emb(x_downsampled, position_ids_downsampled)
+            for layer in self.mid_layers:
+                y_downsampled = layer(
+                    y_downsampled,
+                    position_embeddings_downsampled,
+                    attention_mask=downsampled_attention_mask,
+                    position_ids=position_ids_downsampled,
+                    cache_position=downsampled_cache_position,
+                    past_key_value=past_key_value,
+                    use_cache=use_cache
+                )[0]
+            
         deviation = y_downsampled - x_downsampled        
+        with record_function("upsampler"):
+            # Add the upsampled deviation to the input to the middle layers
+            upsampled_deviation, up_merge_dst = self.upsampler(deviation, down_gate_samples)
+            y = x + upsampled_deviation
 
-        # Add the upsampled deviation to the input to the middle layers
-        upsampled_deviation, up_merge_dst = self.upsampler(deviation, down_gate_samples)
-        y = x + upsampled_deviation
-
-        # Apply up layers to byte tokens
-        for layer in self.up_layers:
-            y = layer(
-                y,
-                position_embeddings,
-                attention_mask=byte_attention_mask,
-                position_ids=position_ids,
-                cache_position=byte_cache_position,
-                past_key_value=past_key_value,
-                use_cache=use_cache
-            )[0]
+        with record_function("up_layers"):
+            # Apply up layers to byte tokens
+            for layer in self.up_layers:
+                y = layer(
+                    y,
+                    position_embeddings,
+                    attention_mask=byte_attention_mask,
+                    position_ids=position_ids,
+                    cache_position=byte_cache_position,
+                    past_key_value=past_key_value,
+                    use_cache=use_cache
+                )[0]
 
 
         out = {
@@ -1131,7 +1142,7 @@ def flexible_training_loop_warm_start_accelerate(
 
                 if step_count % step_print_every == 0 and accelerator.is_main_process:
                     print(f"{accelerator.device}: Bytes elapsed: {non_padding_bytes_elapsed/1e6:.1f}M ar train ar loss: {loss_dict['ar_loss']} nats/token batch time: {batch_wallclock_time:.2f}s model flops utilization: {model_flops_utilization:.2%}")
-
+                    print(f"{accelerator.device}: True Downsample rate: {loss_dict['true_downsample_rate']} target: {loss_dict['downsample_rate_target']}")
                 if (
                     stop_condition is not None and 
                     stop_condition(all_bytes_elapsed, non_padding_bytes_elapsed, flops_elapsed, effective_batches_elapsed) and 

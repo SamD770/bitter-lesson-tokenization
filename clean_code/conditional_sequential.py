@@ -1,6 +1,8 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
+import math
+from optimizing_code.triton_scan_simple import torch_scan_simple, compute_probs, torch_scan_simple_scaled, compute_probs_scaled
 
 
 class SequentialyDependentGater(nn.Module):
@@ -77,7 +79,7 @@ class SequentiallyDependentRandomGater(SequentialyDependentGater):
 
 
 class SequentiallyDependentLinearGater(SequentialyDependentGater):
-    def __init__(self, embedding_dim: int, downsample_rate: float, filter_size: int = 4):
+    def __init__(self, embedding_dim: int, downsample_rate: float, filter_size: int = 8):
         super().__init__(embedding_dim=embedding_dim, downsample_rate=downsample_rate, filter_size=filter_size)
         self.filter_layer = nn.Linear(embedding_dim, filter_size + 1) # +1 for the base value
 
@@ -95,6 +97,44 @@ class SequentiallyDependentLinearGater(SequentialyDependentGater):
             weight += filter_values[:, seq_idx, i] * samples_list[-i-1]
         
         return weight
+
+
+class OptimizedSequentialyDependentLinearGater(nn.Module):
+    def __init__(self, embedding_dim: int, downsample_rate: float, filter_size: int = 4):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.downsample_rate = downsample_rate
+        self.filter_size = filter_size
+        self.filter_layer = nn.Linear(embedding_dim, filter_size)
+
+    def forward(self, x: torch.Tensor, downsample_rate: float) -> torch.Tensor:
+        V = self.filter_layer(x)
+        scan_logits, scan_probs, a = torch_scan_simple(V)
+        logits, probs = compute_probs(a, V)
+        return logits.unsqueeze(-1), probs.unsqueeze(-1), a.unsqueeze(-1)
+
+
+class ScaledSequentialyDependentLinearGater(nn.Module):
+    def __init__(self, embedding_dim: int, downsample_rate: float, filter_size: int = 4):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.downsample_rate = downsample_rate
+        self.filter_size = filter_size
+        self.filter_layer = nn.Linear(embedding_dim, filter_size)
+
+    def forward(self, x: torch.Tensor, downsample_rate: float) -> torch.Tensor:
+        
+        if downsample_rate is None:
+            downsample_rate = self.downsample_rate
+
+        bias = math.log(downsample_rate / (1 - downsample_rate))
+        scale = 1/8.
+        
+        V = self.filter_layer(x)
+        scan_logits, scan_probs, a = torch_scan_simple_scaled(V, scale_factor=scale, bias=bias)
+        logits, probs = compute_probs_scaled(a, V, scale_factor=scale, bias=bias)
+        return logits.unsqueeze(-1), probs.unsqueeze(-1), a.unsqueeze(-1)
+
 
 
 if __name__ == "__main__":

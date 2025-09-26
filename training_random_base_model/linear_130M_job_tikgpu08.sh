@@ -2,7 +2,7 @@
 #SBATCH --job-name=130M_run
 #SBATCH --output=training_random_base_model/logs/130M_%j.out
 #SBATCH --error=training_random_base_model/logs/130M_%j.err
-#SBATCH --time=24:00:00
+#SBATCH --time=48:00:00
 #SBATCH --nodelist=tikgpu08
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=32

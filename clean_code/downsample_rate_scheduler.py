@@ -49,6 +49,19 @@ class RandomDownsampleRateScheduler(DownsampleRateScheduler):
         return self.val_downsample_rate, self.val_downsample_rate
 
 
+class RandomChoiceDownsampleRateScheduler(DownsampleRateScheduler):
+    def __init__(self, downsample_rates, val_downsample_rate):
+        self.downsample_rates = downsample_rates
+        self.val_downsample_rate = val_downsample_rate
+
+    def step(self):
+        downsample_rate = random.choice(self.downsample_rates)
+        return downsample_rate, downsample_rate
+
+    def val_step(self):
+        return self.val_downsample_rate, self.val_downsample_rate
+
+
 class RandomDownsampleRateSchedulerWithInit(DownsampleRateScheduler):
     """
     Allows for the configuring of a deterministic downsample rate for the first step, for debugging CUDA OOMing from a high downsample rate.

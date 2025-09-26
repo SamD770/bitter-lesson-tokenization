@@ -1,3 +1,11 @@
+# Train three models:
+# 1. Downsample rate 1/8
+# 2. Downsample rate 1/4
+# 3. Variable downsample rate
+# Make two checkpoints for all models:
+# 1. Checkpoint 1: after 3.4e9 bytes (equal amount of data)
+# 2. Checkpoint 2: after equal amount of Flops (1.5e12)
+
 from training_random_base_model.hparam_utils import get_model_kwargs, get_optimization_kwargs, model_sizes, training_loop_hparam_defaults
 from data_processing import split_fineweb
 
@@ -8,12 +16,15 @@ from clean_code.flexible_bitter_llm import (
     ExactRandomGater,
     LinearGater,
     BytesLimitCondition, 
-    save_checkpoint
+    save_checkpoint,
+    DownsampleRateEmbedding,
 )
+
+from clean_code.downsample_rate_scheduler import RandomChoiceDownsampleRateScheduler
 
 from clean_code.nawrot_plugin import NawrotDownsampler, NawrotUpsampler, NawrotGater
 
-from clean_code.conditional_sequential import ScaledSequentialyDependentLinearGater, OptimizedSequentialyDependentLinearGater
+from clean_code.conditional_sequential import OptimizedSequentialyDependentLinearGater
 
 import os
 
@@ -165,6 +176,7 @@ def add_linear_model_kwargs(model_kwargs):
     model_kwargs["GaterClass"] = LinearGater
     return model_kwargs
 
+
 def add_linear_training_loop_kwargs(training_loop_kwargs):
     training_loop_kwargs["learn_gating"] = True
     training_loop_kwargs["discount_rate"] = 0.99
@@ -172,15 +184,26 @@ def add_linear_training_loop_kwargs(training_loop_kwargs):
     return training_loop_kwargs
 
 def add_sequential_dependent_linear_model_kwargs(model_kwargs):
-    model_kwargs["GaterClass"] = ScaledSequentialyDependentLinearGater
+    model_kwargs["GaterClass"] = OptimizedSequentialyDependentLinearGater
     return model_kwargs
 
 def add_sequential_dependent_linear_training_loop_kwargs(training_loop_kwargs):
     training_loop_kwargs["learn_gating"] = True
     training_loop_kwargs["discount_rate"] = 0.99
     training_loop_kwargs["early_exit_advantage_estimate"] = True
-    training_loop_kwargs["relative_gating_loss_weight"] = 1.0
-    training_loop_kwargs["consistency_loss_weight"] = 0.1
+    training_loop_kwargs["relative_gating_loss_weight"] = 0.01
+    training_loop_kwargs["consistency_loss_weight"] = 0.01
+    return training_loop_kwargs
+
+def add_flexi_model_kwargs(model_kwargs):
+    model_kwargs["DownsampleRateEmbeddingClass"] = DownsampleRateEmbedding
+    return model_kwargs
+
+
+def add_flexi_training_loop_kwargs(training_loop_kwargs):
+    # geometric series of 1 + 0.8 + 0.8^2 + ... + 0.8^19 \approx 5, so this will give an expected downsample rate of roughly 0.35.
+    training_loop_kwargs["downsample_rate_schedule"] = RandomChoiceDownsampleRateScheduler(list(0.8**i for i in range(15)), 0.25)
+    # training_loop_kwargs["consistency_loss_weight"] = 1.
     return training_loop_kwargs
 
 
@@ -205,14 +228,18 @@ def main():
     model_kwargs["vocab_size"] = len(byte_tokenizer) # Keep for ExactRandomGater
     model_kwargs["flash_attn"] = True
     add_sequential_dependent_linear_model_kwargs(model_kwargs)
+    add_flexi_model_kwargs(model_kwargs)
 
     accelerator =  Accelerator(log_with="wandb")
 
     optimization_kwargs = get_optimization_kwargs(args.model_size)
+    optimization_kwargs["effective_batch_size"] = optimization_kwargs["effective_batch_size"] // 4 # Reduce this so we get more different downsample rates.
 
     training_loop_kwargs = training_loop_hparam_defaults
     training_loop_kwargs["early_output_loss_weight"] = 0.2
+    training_loop_kwargs["step_print_every"] = 1
     add_sequential_dependent_linear_training_loop_kwargs(training_loop_kwargs)
+    add_flexi_training_loop_kwargs(training_loop_kwargs)
 
     delta_optimization_kwargs, delta_training_loop_kwargs = \
         effective_to_device_steps(optimization_kwargs, training_loop_kwargs, accelerator, args.batch_size)
@@ -280,7 +307,7 @@ def main():
     accelerator.end_training()
 
     net_scratch_dir = os.path.join("/itet-stor/sdauncey/net_scratch/VScodeProjects/bitter-lesson-tokenization")
-    checkpoint_dir = os.path.join(net_scratch_dir, "training_random_base_model", "checkpoints", run_id)
+    checkpoint_dir = os.path.join(net_scratch_dir, "flexify_training", "checkpoints", run_id)
 
     if accelerator.is_main_process: 
         print(f"Saving checkpoint to {checkpoint_dir}")

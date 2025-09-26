@@ -41,7 +41,7 @@ def main():
     model = learned_model
 
     _, _, test_set = split_fineweb.get_splits()
-    
+
     test_dataloader = DataLoader(
         test_set,
         batch_size=32
