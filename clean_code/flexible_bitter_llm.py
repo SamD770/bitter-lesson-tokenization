@@ -824,6 +824,7 @@ def off_policy_flexible_training_step(
         out_model = model(batch, prescribed_down_gate_samples=prescribed_down_gate_samples, downsample_rate=downsample_rate)
     
     on_policy_probs = out_model["down_gate_probs"]
+    on_policy_logits = out_model["down_gate_logits"]
 
     if not use_off_policy:
         off_policy_gate_probs = on_policy_probs
@@ -872,8 +873,10 @@ def off_policy_flexible_training_step(
         gating_loss = - (selected_action_likelihood_ratios * discounted_rewards * selected_action_log_probs).mean() # Negative as we want to maximise the reward.
         gating_loss = relative_gating_loss_weight * gating_loss
 
-        # Hacky additional consistency loss: make the downsampling rate match the training gating.
-        down_gate_rate_loss = consistency_loss_weight*(downsample_rate_target - true_downsample_rate) **2
+        # Hacky additional consistency loss : decrease the mean logits if the true downsample rate exceeds the target.
+        factor = (true_downsample_rate - downsample_rate_target).detach()
+        mean_logits = on_policy_logits.mean()
+        down_gate_rate_loss = consistency_loss_weight * mean_logits * factor
 
         total_loss = ar_loss + gating_loss + down_gate_rate_loss
     else:
