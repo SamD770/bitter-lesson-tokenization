@@ -127,7 +127,7 @@ def logit_soft_cap(logits, soft_cap=6.0):
 def torch_scan_simple(V):
     batch_size, seq_len, window_size = V.shape
     V_init_device = V.device
-    # V = V.to(dtype=torch.float32)
+    V = V.to("cpu") # For now, run this on CPU (faster than naive torch on GPU)
     
     U = torch.rand(batch_size, seq_len).to(dtype=V.dtype, device=V.device)
 
@@ -177,9 +177,9 @@ def compute_probs(a, V):
 def torch_scan_simple_scaled(V, scale_factor=1.0, bias=0.0):
     batch_size, seq_len, window_size = V.shape
     V_init_device = V.device
-    # V = V.to(dtype=torch.float32)
+    V = V.to("cpu") # For now, run this on CPU (faster than naive torch on GPU)
     
-    U = torch.rand(batch_size, seq_len).to(dtype=V.dtype, device=V.device)
+    U = torch.rand(batch_size, seq_len)
 
     # We set a to be 1 by default, such that V[:, :, -1] is always applied in the sum.
     a = torch.ones(batch_size, seq_len + window_size - 1).to(dtype=V.dtype, device=V.device)
@@ -192,8 +192,8 @@ def torch_scan_simple_scaled(V, scale_factor=1.0, bias=0.0):
         a_window = a[:, s:s+window_size]
         V_window = V[:, s, :]
         logit = torch.sum(a_window * V_window, dim=1)
-        logit = logit_soft_cap(logit)
         logit = logit * scale_factor + bias
+        logit = logit_soft_cap(logit)
         prob = F.sigmoid(logit)
         probs[:, s] = prob
         logits[:, s] = logit
@@ -219,8 +219,8 @@ def compute_probs_scaled(a, V, scale_factor=1.0, bias=0.0):
     # V[:, :, -1] should always be applied in the sum. This ensures this.
     a_window[:, :, -1] = 1. 
     logits = torch.sum(a_window * V, dim=2)
-    logits = logit_soft_cap(logits)
     logits = logits * scale_factor + bias
+    logits = logit_soft_cap(logits)
     probs = F.sigmoid(logits)
     return logits, probs
 
