@@ -24,7 +24,7 @@ from clean_code.downsample_rate_scheduler import RandomChoiceDownsampleRateSched
 
 from clean_code.nawrot_plugin import NawrotDownsampler, NawrotUpsampler, NawrotGater
 
-from clean_code.conditional_sequential import OptimizedSequentialyDependentLinearGater
+from clean_code.conditional_sequential import OptimizedSequentialyDependentLinearGater, ScaledSequentialyDependentLinearGater
 
 import os
 
@@ -130,7 +130,8 @@ def get_dataloaders(batch_size, log_status, num_processes):
         train_set,
         batch_size=batch_size,
         num_workers=8,
-        pin_memory=True
+        pin_memory=True,
+        shuffle=True,
     )
 
     # Ensure that we never try to load more than the val dataset in one batch
@@ -184,16 +185,18 @@ def add_linear_training_loop_kwargs(training_loop_kwargs):
     return training_loop_kwargs
 
 def add_sequential_dependent_linear_model_kwargs(model_kwargs):
-    model_kwargs["GaterClass"] = OptimizedSequentialyDependentLinearGater
+    model_kwargs["GaterClass"] = ScaledSequentialyDependentLinearGater
+    model_kwargs["gater_kwargs"] = {"scale_factor": 1/16., "filter_size": 8}
     return model_kwargs
 
 def add_sequential_dependent_linear_training_loop_kwargs(training_loop_kwargs):
     training_loop_kwargs["learn_gating"] = True
     training_loop_kwargs["discount_rate"] = 0.99
     training_loop_kwargs["early_exit_advantage_estimate"] = True
-    training_loop_kwargs["relative_gating_loss_weight"] = 0.01
-    training_loop_kwargs["consistency_loss_weight"] = 0.01
+    training_loop_kwargs["relative_gating_loss_weight"] = 0.1
+    training_loop_kwargs["consistency_loss_weight"] = 0.1
     return training_loop_kwargs
+
 
 def add_flexi_model_kwargs(model_kwargs):
     model_kwargs["DownsampleRateEmbeddingClass"] = DownsampleRateEmbedding
@@ -201,8 +204,13 @@ def add_flexi_model_kwargs(model_kwargs):
 
 
 def add_flexi_training_loop_kwargs(training_loop_kwargs):
-    # geometric series of 1 + 0.8 + 0.8^2 + ... + 0.8^19 \approx 5, so this will give an expected downsample rate of roughly 0.35.
-    training_loop_kwargs["downsample_rate_schedule"] = RandomChoiceDownsampleRateScheduler(list(0.8**i for i in range(15)), 0.25)
+    # geometric series of 1 + 0.9 + 0.9^2 + ... + 0.9^40 \approx 10, so this will give an expected downsample rate of roughly 10/40 \approx 0.25.
+    # Old schedule: list(0.9**i for i in range(1, 35))
+
+    # Uniform betweeen 0.1 and 0.3
+    downsample_rates = [0.1 + 0.02 * i for i in range(10)]
+    training_loop_kwargs["downsample_rate_schedule"] = RandomChoiceDownsampleRateScheduler(downsample_rates, 0.25)
+    
     # training_loop_kwargs["consistency_loss_weight"] = 1.
     return training_loop_kwargs
 

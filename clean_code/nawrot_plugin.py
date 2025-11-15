@@ -61,7 +61,7 @@ class NawrotDownsampler(nn.Module):
     
 class NawrotUpsampler(nn.Module):
 
-    def forward(self, x: torch.Tensor, gate_samples: torch.Tensor) -> torch.Tensor:
+    def forward(self, x, x_downsampled, y_downsampled, gate_samples, gate_probs) -> torch.Tensor:
 
         
         x_dtype_store = x.dtype

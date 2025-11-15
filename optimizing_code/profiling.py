@@ -7,7 +7,8 @@ from clean_code.flexible_bitter_llm import (
 from clean_code.conditional_sequential import (
     SequentiallyDependentLinearGater,
     SequentiallyDependentRandomGater,
-    OptimizedSequentialyDependentLinearGater
+    OptimizedSequentialyDependentLinearGater,
+    ScaledSequentialyDependentLinearGater
 )
 
 from torch.profiler import record_function, profile, ProfilerActivity, schedule
@@ -34,7 +35,7 @@ my_model = FlexibleBitterLLM(
     n_down_layers=3,
     n_mid_layers=18,
     n_up_layers=3,
-    GaterClass=LinearGater,
+    GaterClass=ScaledSequentialyDependentLinearGater,
     flash_attn=True
 ).to(accelerator.device, dtype=torch.bfloat16)
 

@@ -1,7 +1,7 @@
 """
 Define hyperparameters for a series of models with sizes 16M -> 346M. For a standardised pretraining run.
 """
-from clean_code.flexible_bitter_llm import SelectTokenDownsampler, ExactRandomGater, FlexibleBitterLLM
+from clean_code.flexible_bitter_llm import SelectTokenDownsampler, ExactRandomGater, FlexibleBitterLLM, DistributeDeviationUpsampler
 from clean_code.utils import parameter_count_string
 
 model_sizes = ["18M", "32M", "73M", "130M", "346M"]
@@ -12,6 +12,7 @@ fixed_model_hparams = {
     "sliding_window": 64,
     "GaterClass": ExactRandomGater,
     "DownSamplerClass": SelectTokenDownsampler,
+    "UpsamplerClass": DistributeDeviationUpsampler,
 }
 
 variable_model_hparam_dict  = {

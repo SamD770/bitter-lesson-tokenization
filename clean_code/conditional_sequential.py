@@ -115,11 +115,12 @@ class OptimizedSequentialyDependentLinearGater(nn.Module):
 
 
 class ScaledSequentialyDependentLinearGater(nn.Module):
-    def __init__(self, embedding_dim: int, downsample_rate: float, filter_size: int = 4):
+    def __init__(self, embedding_dim: int, downsample_rate: float, filter_size: int = 8, scale_factor: float = 1/16.):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.downsample_rate = downsample_rate
         self.filter_size = filter_size
+        self.scale_factor = scale_factor
         self.filter_layer = nn.Linear(embedding_dim, filter_size)
 
     def forward(self, x: torch.Tensor, downsample_rate: float) -> torch.Tensor:
@@ -127,12 +128,23 @@ class ScaledSequentialyDependentLinearGater(nn.Module):
         if downsample_rate is None:
             downsample_rate = self.downsample_rate
 
+        downsample_rate = min(downsample_rate, 0.999) # In case the downsample rate is 1.
         bias = math.log(downsample_rate / (1 - downsample_rate))
-        scale = 1/8.
+        x_init_dtype = x.dtype
+        # x = x.to(dtype=torch.float32)
+
+        # if self.filter_layer.weight.dtype != torch.float32:
+        #     self.to(dtype=torch.float32)
         
         V = self.filter_layer(x)
-        scan_logits, scan_probs, a = torch_scan_simple_scaled(V, scale_factor=scale, bias=bias)
-        logits, probs = compute_probs_scaled(a, V, scale_factor=scale, bias=bias)
+        scan_logits, scan_probs, a = torch_scan_simple_scaled(V, scale_factor=self.scale_factor, bias=bias)
+        logits, probs = compute_probs_scaled(a, V, scale_factor=self.scale_factor, bias=bias)
+        
+        logits = logits.to(dtype=x_init_dtype)
+        probs = probs.to(dtype=x_init_dtype)
+        a = a.to(dtype=x_init_dtype)
+
+        
         return logits.unsqueeze(-1), probs.unsqueeze(-1), a.unsqueeze(-1)
 
 

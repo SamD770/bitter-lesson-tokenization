@@ -7,8 +7,10 @@ from clean_code.flexible_bitter_llm import (
     flexible_training_loop_warm_start_accelerate, 
     ExactRandomGater,
     LinearGater,
-    BytesLimitCondition, 
-    save_checkpoint
+    BytesLimitCondition,
+    DistributeAddUpsampler, 
+    save_checkpoint,
+    load_checkpoint,
 )
 
 from clean_code.nawrot_plugin import NawrotDownsampler, NawrotUpsampler, NawrotGater
@@ -26,6 +28,7 @@ from transformers import AutoTokenizer
 import datasets
 from accelerate import Accelerator
 from accelerate.utils import set_seed
+from accelerate import DistributedDataParallelKwargs
 
 from datetime import datetime
 
@@ -61,7 +64,9 @@ def effective_to_device_steps(optimization_kwargs, training_loop_kwargs, acceler
     lr_total_updates = lr_total_effective_batches * accelerator.num_processes
     lr_warmup_updates = lr_warmup_effective_batches * accelerator.num_processes
 
-    stop_condition = BytesLimitCondition(optimization_kwargs["training_bytes"])
+    # stop_condition = BytesLimitCondition(optimization_kwargs["training_bytes"])
+    max_training_bytes = optimization_kwargs["training_bytes"]
+    checkpoint_conditions = [BytesLimitCondition(max_training_bytes * i / 10) for i in range(1, 11)]
 
     delta_optimization_kwargs = {
         "batch_size": batch_size,
@@ -70,11 +75,11 @@ def effective_to_device_steps(optimization_kwargs, training_loop_kwargs, acceler
         "gradient_accumulation_steps": gradient_accumulation_steps
     }
 
-    delta_training_loop_kwargs = {
-        "stop_condition": stop_condition,
-    }
+    # delta_training_loop_kwargs = {
+    #     "stop_condition": stop_condition,
+    # }
 
-    return delta_optimization_kwargs, delta_training_loop_kwargs
+    return delta_optimization_kwargs, checkpoint_conditions
 
 
 def get_optimizer_scheduler(optimization_kwargs, model):
@@ -173,15 +178,31 @@ def add_linear_training_loop_kwargs(training_loop_kwargs):
 
 def add_sequential_dependent_linear_model_kwargs(model_kwargs):
     model_kwargs["GaterClass"] = ScaledSequentialyDependentLinearGater
+    model_kwargs["gater_kwargs"] = {"scale_factor": 1/16., "filter_size": 8}
     return model_kwargs
 
 def add_sequential_dependent_linear_training_loop_kwargs(training_loop_kwargs):
     training_loop_kwargs["learn_gating"] = True
     training_loop_kwargs["discount_rate"] = 0.99
     training_loop_kwargs["early_exit_advantage_estimate"] = True
-    training_loop_kwargs["relative_gating_loss_weight"] = 1.0
-    training_loop_kwargs["consistency_loss_weight"] = 0.1
+    training_loop_kwargs["relative_gating_loss_weight"] = 0.01
+    training_loop_kwargs["consistency_loss_weight"] = 0.01
+    training_loop_kwargs["early_output_loss_weight"] = 0.1
     return training_loop_kwargs
+
+
+def add_sparse_model_kwargs(model_kwargs):
+    model_kwargs["downsample_rate"] = 2/3
+    model_kwargs["gater_kwargs"] = {"scale_factor": 1/8., "filter_size": 8}
+    return model_kwargs
+
+def add_sparse_training_loop_kwargs(training_loop_kwargs):
+    training_loop_kwargs["downsample_rate_target"] = 2/3
+    return training_loop_kwargs
+
+def add_add_upsampler_model_kwargs(model_kwargs):
+    model_kwargs["UpsamplerClass"] = DistributeAddUpsampler
+    return model_kwargs
 
 
 def main():
@@ -191,6 +212,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--model_size", type=str, default="18M", choices=model_sizes, help="Model size to train")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size used on each GPU")
+    parser.add_argument("--resume_checkpoint", type=str, default=None, help="Checkpoint to resume training from")
     args = parser.parse_args()
 
 
@@ -203,10 +225,11 @@ def main():
 
     model_kwargs = get_model_kwargs(args.model_size)
     model_kwargs["vocab_size"] = len(byte_tokenizer) # Keep for ExactRandomGater
-    model_kwargs["flash_attn"] = True
     add_sequential_dependent_linear_model_kwargs(model_kwargs)
+    add_add_upsampler_model_kwargs(model_kwargs)
 
-    accelerator =  Accelerator(log_with="wandb")
+    # ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    accelerator =  Accelerator(log_with="wandb") # , kwargs_handlers=[ddp_kwargs])
 
     optimization_kwargs = get_optimization_kwargs(args.model_size)
 
@@ -214,13 +237,13 @@ def main():
     training_loop_kwargs["early_output_loss_weight"] = 0.2
     add_sequential_dependent_linear_training_loop_kwargs(training_loop_kwargs)
 
-    delta_optimization_kwargs, delta_training_loop_kwargs = \
+    delta_optimization_kwargs, checkpoint_conditions = \
         effective_to_device_steps(optimization_kwargs, training_loop_kwargs, accelerator, args.batch_size)
 
     optimization_kwargs.update(delta_optimization_kwargs)
-    training_loop_kwargs.update(delta_training_loop_kwargs)
+    # training_loop_kwargs.update(delta_training_loop_kwargs)
 
-    config = {**vars(args), **training_loop_kwargs, **optimization_kwargs, **model_kwargs}
+    config = {**vars(args), **training_loop_kwargs, **optimization_kwargs, **model_kwargs, "stop_condition":checkpoint_conditions[-1]}
 
     if accelerator.is_main_process: 
         for k, v in config.items():
@@ -229,7 +252,15 @@ def main():
     accelerator.gradient_accumulation_steps = delta_optimization_kwargs["gradient_accumulation_steps"]
     
     time_string = datetime.now().strftime('%Y.%m.%d_%H.%M')
-    run_id = f"{args.model_size}_{time_string}"
+
+    if args.seed == 42:
+        seed_string = ""
+    else:
+        seed_string = f"{args.seed}"
+    run_id = f"{args.model_size}_{seed_string}_{time_string}"
+
+    if accelerator.is_main_process:
+        print(f"Run ID: {run_id}")
 
     # For some reason, you need to pass the config to the init_kwargs when using wandb with accelerate in offline mode. https://github.com/huggingface/accelerate/issues/3607
     accelerator.init_trackers(
@@ -257,6 +288,7 @@ def main():
 
     model = FlexibleBitterLLM(**model_kwargs).to(device, dtype=torch.bfloat16)
 
+
     if accelerator.is_main_process:
         print(f"model has {parameter_count_string(model)} parameters")
 
@@ -266,26 +298,43 @@ def main():
         model, optimizer, scheduler, train_dataloader, val_dataloader
     )
 
-    elapsed_vals = flexible_training_loop_warm_start_accelerate(
-        model, 
-        optimizer, 
-        scheduler, 
-        train_dataloader, 
-        val_dataloader,
-        accelerator, 
-        tokenizer=byte_tokenizer,
-        **training_loop_kwargs
-    )
+    if args.resume_checkpoint:
+        train_dataloader, elapsed_vals = load_checkpoint(
+            args.resume_checkpoint, accelerator, train_dataloader, optimization_kwargs["effective_batch_size"], args.batch_size
+        )
+    
+    elapsed_vals = {}
+
+    intermediate_checkpoint_dir = os.path.join(scratch_dir, "training_random_base_model", "checkpoints", run_id)
+
+    for checkpoint_condition in checkpoint_conditions:
+
+        elapsed_vals = flexible_training_loop_warm_start_accelerate(
+            model, 
+            optimizer, 
+            scheduler, 
+            train_dataloader, 
+            val_dataloader,
+            accelerator, 
+            tokenizer=byte_tokenizer,
+            stop_condition=checkpoint_condition,
+            **elapsed_vals,
+            **training_loop_kwargs
+        )
+        
+        if accelerator.is_main_process:
+            print(f"Saving intermediate checkpoint to {intermediate_checkpoint_dir}")
+            save_checkpoint(intermediate_checkpoint_dir, accelerator, elapsed_vals)
 
     accelerator.end_training()
 
     net_scratch_dir = os.path.join("/itet-stor/sdauncey/net_scratch/VScodeProjects/bitter-lesson-tokenization")
-    checkpoint_dir = os.path.join(net_scratch_dir, "training_random_base_model", "checkpoints", run_id)
+    final_checkpoint_dir = os.path.join(net_scratch_dir, "training_random_base_model", "checkpoints", run_id)
 
     if accelerator.is_main_process: 
-        print(f"Saving checkpoint to {checkpoint_dir}")
+        print(f"Saving checkpoint to {final_checkpoint_dir}")
 
-    save_checkpoint(checkpoint_dir, accelerator, elapsed_vals)
+    save_checkpoint(final_checkpoint_dir, accelerator, elapsed_vals)
 
 if __name__ == "__main__":
     main()
