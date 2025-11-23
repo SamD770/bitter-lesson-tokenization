@@ -188,6 +188,7 @@ def add_sequential_dependent_linear_training_loop_kwargs(training_loop_kwargs):
     training_loop_kwargs["relative_gating_loss_weight"] = 0.01
     training_loop_kwargs["consistency_loss_weight"] = 0.01
     training_loop_kwargs["early_output_loss_weight"] = 0.1
+    training_loop_kwargs["step_print_every"] = 10
     return training_loop_kwargs
 
 
@@ -205,6 +206,16 @@ def add_add_upsampler_model_kwargs(model_kwargs):
     return model_kwargs
 
 
+def add_variable_aspect_ratio_kwargs(model_kwargs, training_loop_kwargs, optimization_kwargs, aspect_ratio):
+    model_kwargs["n_mid_layers"] = aspect_ratio
+    model_kwargs["n_down_layers"] = 4
+    model_kwargs["n_up_layers"] = 4
+    model_kwargs["downsample_rate"] = 1/aspect_ratio
+    training_loop_kwargs["downsample_rate_target"] = 1/aspect_ratio
+    optimization_kwargs["training_bytes"] = 3e9
+
+
+
 def main():
 
     # Parse command line arguments
@@ -213,6 +224,8 @@ def main():
     parser.add_argument("--model_size", type=str, default="18M", choices=model_sizes, help="Model size to train")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size used on each GPU")
     parser.add_argument("--resume_checkpoint", type=str, default=None, help="Checkpoint to resume training from")
+    parser.add_argument("--aspect_ratio", type=int, default=None, help="Aspect ratio to train at")
+    parser.add_argument("--updownsampler", type=str, default="random", choices=["random","sequential", "nawrot"], help="Upsampler/Downsampler/Gater to use")
     args = parser.parse_args()
 
 
@@ -225,8 +238,6 @@ def main():
 
     model_kwargs = get_model_kwargs(args.model_size)
     model_kwargs["vocab_size"] = len(byte_tokenizer) # Keep for ExactRandomGater
-    add_sequential_dependent_linear_model_kwargs(model_kwargs)
-    add_add_upsampler_model_kwargs(model_kwargs)
 
     # ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator =  Accelerator(log_with="wandb") # , kwargs_handlers=[ddp_kwargs])
@@ -234,8 +245,22 @@ def main():
     optimization_kwargs = get_optimization_kwargs(args.model_size)
 
     training_loop_kwargs = training_loop_hparam_defaults
-    training_loop_kwargs["early_output_loss_weight"] = 0.2
-    add_sequential_dependent_linear_training_loop_kwargs(training_loop_kwargs)
+
+    if args.aspect_ratio:
+        assert args.aspect_ratio in [1, 2, 3, 4, 5, 6, 7, 8], "Aspect ratio must be one of 1, 2, 3, 4, 5, 6, 7, 8"
+        add_variable_aspect_ratio_kwargs(model_kwargs, training_loop_kwargs, optimization_kwargs, args.aspect_ratio)
+
+
+    if args.updownsampler == "random":
+        add_add_upsampler_model_kwargs(model_kwargs)
+    if args.updownsampler == "sequential":
+        add_sequential_dependent_linear_model_kwargs(model_kwargs)
+        add_sequential_dependent_linear_training_loop_kwargs(training_loop_kwargs)
+        add_add_upsampler_model_kwargs(model_kwargs)
+    elif args.updownsampler == "nawrot":
+        add_nawrot_model_kwargs(model_kwargs)
+        add_nawrot_training_loop_kwargs(training_loop_kwargs)
+
 
     delta_optimization_kwargs, checkpoint_conditions = \
         effective_to_device_steps(optimization_kwargs, training_loop_kwargs, accelerator, args.batch_size)
@@ -254,10 +279,16 @@ def main():
     time_string = datetime.now().strftime('%Y.%m.%d_%H.%M')
 
     if args.seed == 42:
-        seed_string = ""
+        seed_string = "_"
     else:
-        seed_string = f"{args.seed}"
-    run_id = f"{args.model_size}_{seed_string}_{time_string}"
+        seed_string = f"{args.seed}_"
+
+    if args.aspect_ratio:
+        aspect_ratio_string = f"ar{args.aspect_ratio}_"
+    else:
+        aspect_ratio_string = "_"
+    
+    run_id = f"{args.model_size}_{args.updownsampler}_{aspect_ratio_string}{seed_string}{time_string}"
 
     if accelerator.is_main_process:
         print(f"Run ID: {run_id}")

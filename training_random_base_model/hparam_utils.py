@@ -4,11 +4,11 @@ Define hyperparameters for a series of models with sizes 16M -> 346M. For a stan
 from clean_code.flexible_bitter_llm import SelectTokenDownsampler, ExactRandomGater, FlexibleBitterLLM, DistributeDeviationUpsampler
 from clean_code.utils import parameter_count_string
 
-model_sizes = ["18M", "32M", "73M", "130M", "346M"]
+model_sizes = ["18M", "20M", "32M", "40M", "73M", "90M", "130M", "147M", "346M"]
 
 fixed_model_hparams = {
     "vocab_size": 320, # This is the len() of the evabyte tokenizer.
-    "downsample_rate": 0.25,
+    "downsample_rate": 0.2,
     "sliding_window": 64,
     "GaterClass": ExactRandomGater,
     "DownSamplerClass": SelectTokenDownsampler,
@@ -30,12 +30,26 @@ variable_model_hparam_dict  = {
         "n_mid_layers": 6,
         "n_up_layers": 2,
     },
+    "20M": {
+        "embedding_dim": 384,
+        "num_heads": 6,
+        "n_down_layers": 2,
+        "n_mid_layers": 6,
+        "n_up_layers": 2,
+    },
     "32M": {
         "embedding_dim": 512,
         "num_heads": 8,
         "n_down_layers": 2,
         "n_mid_layers": 6,
         "n_up_layers": 2,
+    },
+    "40M": {
+        "embedding_dim": 512,
+        "num_heads": 8,
+        "n_down_layers": 4,
+        "n_mid_layers": 6,
+        "n_up_layers": 4,
     },
     "73M": {
         "embedding_dim": 768,
@@ -44,12 +58,26 @@ variable_model_hparam_dict  = {
         "n_mid_layers": 6,
         "n_up_layers": 2,
     },
+    "90M": {
+        "embedding_dim": 768,
+        "num_heads": 12,
+        "n_down_layers": 4,
+        "n_mid_layers": 6,
+        "n_up_layers": 4,
+    },
     "130M":{
         "embedding_dim": 768,
         "num_heads": 12,
         "n_down_layers": 2,
         "n_mid_layers": 12,
         "n_up_layers": 2,
+    },
+    "147M":{
+        "embedding_dim": 768,
+        "num_heads": 12,
+        "n_down_layers": 4,
+        "n_mid_layers": 12,
+        "n_up_layers": 4,
     },
     "346M": {
         "embedding_dim": 1024,
@@ -62,6 +90,8 @@ variable_model_hparam_dict  = {
 
 training_loop_hparam_defaults = {
     "num_epochs": 1, 
+    "downsample_rate_target": 0.2,
+    "early_output_loss_weight": 0.,
     "max_seq_length": 4096,
     "step_print_every": 100, 
     "validate_every": 100,
@@ -80,8 +110,20 @@ optimization_hparam_dict = {
         "warmup_bytes": 6.2e7,
         "training_bytes": 8.3e8,
     },
+    "20M": {
+        "learning_rate": 3e-3,
+        "effective_batch_size": 32,
+        "warmup_bytes": 6.2e7,
+        "training_bytes": 8.3e8,
+    },
     "32M": {
         "learning_rate": 3e-3,
+        "effective_batch_size": 64,
+        "warmup_bytes": 1.1e8,
+        "training_bytes": 1.5e9,
+    },
+    "40M": {
+        "learning_rate": 2.4e-3,
         "effective_batch_size": 64,
         "warmup_bytes": 1.1e8,
         "training_bytes": 1.5e9,
@@ -92,8 +134,20 @@ optimization_hparam_dict = {
         "warmup_bytes": 2.5e8,
         "training_bytes": 3.4e9,
     },
+    "90M": {
+        "learning_rate": 2e-3,
+        "effective_batch_size": 128,
+        "warmup_bytes": 2.5e8,
+        "training_bytes": 3.4e9,    
+    },
     "130M": {
         "learning_rate": 2e-3,
+        "effective_batch_size": 128,
+        "warmup_bytes": 4.5e8,
+        "training_bytes": 6e9,
+    },
+    "147M": {
+        "learning_rate": 1.5e-3,
         "effective_batch_size": 128,
         "warmup_bytes": 4.5e8,
         "training_bytes": 6e9,

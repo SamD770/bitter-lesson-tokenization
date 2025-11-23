@@ -1,0 +1,21 @@
+Bootstrap: docker
+From: pytorch/pytorch:2.7.0-cuda12.6-cudnn9-devel
+
+%post
+    # Additional setup if needed
+    export CUDA_HOME="/usr/local/cuda"
+    pip3 install --no-cache-dir --upgrade pip
+    pip3 install packaging
+    pip3 install ninja
+    pip3 install flash-attn --no-build-isolation
+    pip3 install transformers
+    pip3 install datasets
+
+%environment
+    export LC_ALL=C
+    export CUDA_HOME="/usr/local/cuda"
+
+
+%runscript
+    python --version
+    echo "To run your script, use: apptainer exec pytorch_container.sif python /path/to/your/script.py"

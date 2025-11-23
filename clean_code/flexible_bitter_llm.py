@@ -500,12 +500,6 @@ class FlexibleBitterLLM(nn.Module):
                 down_gate_probs
             )
 
-        # deviation = y_downsampled # todo: refactor to allow deviation modelling based on an upsampling class. Could be y_downsampled - x_downsampled.        
-        # with record_function("upsampler"):
-        #     # Add the upsampled deviation to the input to the middle layers
-        #     upsampled_deviation, up_merge_dst = self.upsampler(deviation, down_gate_samples)
-        #     y = x + upsampled_deviation
-
         with record_function("up_layers"):
             # Apply up layers to byte tokens
             for layer in self.up_layers:

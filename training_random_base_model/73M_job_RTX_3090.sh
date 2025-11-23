@@ -3,7 +3,7 @@
 #SBATCH --output=training_random_base_model/logs/73M_%j.out
 #SBATCH --error=training_random_base_model/logs/73M_%j.err
 #SBATCH --time=24:00:00
-#SBATCH --nodelist=tikgpu08
+#SBATCH --nodelist=tikgpu07
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32GB

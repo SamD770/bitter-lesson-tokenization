@@ -20,7 +20,7 @@ import numpy as np
 def main():
     byte_tokenizer = AutoTokenizer.from_pretrained("evabyte/EvaByte", trust_remote_code=True)
 
-    learned_checkpoint_path = "training_random_base_model/checkpoints/130M_2025.08.24_09.01"
+    learned_checkpoint_path = "training_random_base_model/checkpoints/130M_2025.09.26_18.06"
     learned_model_kwargs = get_model_kwargs("130M")
     learned_model_kwargs["vocab_size"] = len(byte_tokenizer) 
     learned_model_kwargs["GaterClass"] = LinearGater

@@ -26,6 +26,7 @@ def main():
     accelerator = Accelerator()
 
     model_kwargs = get_model_kwargs(model_size)
+    model_kwargs["flash_attn"] = False
     model = FlexibleBitterLLM(**model_kwargs).to(device, dtype=torch.bfloat16)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 

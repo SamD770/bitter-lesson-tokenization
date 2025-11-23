@@ -64,20 +64,25 @@ class NawrotUpsampler(nn.Module):
     def forward(self, x, x_downsampled, y_downsampled, gate_samples, gate_probs) -> torch.Tensor:
 
         
-        x_dtype_store = x.dtype
-        x = x.to(torch.float32)
+        y_dtype_store = y_downsampled.dtype
+        y_downsampled = y_downsampled.to(torch.float32)
 
-        x_upsampled = self.upsample_x(x, gate_samples)
+        y = self.upsample_x(y_downsampled, gate_samples)
         up_merge_dst, _ = get_merge_dst(gate_samples)
         up_merge_dst = up_merge_dst.unsqueeze(-1)
 
-        x_upsampled = x_upsampled.to(x_dtype_store)
+        y = y.to(y_dtype_store)
 
-        return x_upsampled, up_merge_dst
+        # According to Nawrot: 
+        # "Afterwards, u_t [y in our notation] is added to the highway layer representation h_t [x in our notation] to produce the output of the layer."
+        y = y + x
+
+        return y, up_merge_dst
 
     def upsample_x(self, x: torch.Tensor, hard_boundaries: torch.Tensor) -> torch.Tensor:
         """Upsamples the input tensor x using the Nawrot et al. 2023 method."""
         # x is of shape [bs, seq_len, emb_dim], but nawrot_downsampler expects [seq_len, bs, emb_dim]
+        
         x = x.transpose(0, 1)
 
         # Upsample the input

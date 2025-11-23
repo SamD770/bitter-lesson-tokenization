@@ -13,4 +13,6 @@ echo "Starting training random base model with seed $SEED at $(date)"
 apptainer exec --nv --bind \
  /itet-stor/sdauncey/net_scratch:/itet-stor/sdauncey/net_scratch,/scratch/sdauncey:/scratch/sdauncey \
  /scratch/sdauncey/sams_favorite_build.sif \
- bash training_random_base_model/launch_distributed.sh 130M 32
+ bash training_random_base_model/launch_distributed.sh 130M 16
+ 
+# batch size 32 possible when using flash attn
