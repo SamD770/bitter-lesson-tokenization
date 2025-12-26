@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=64GB
-#SBATCH --array=1,2,3%1
+#SBATCH --array=3
 
 if [ $SLURM_ARRAY_TASK_ID -eq 1 ]; then
     UPDOWN_SAMPLER="sequential"
@@ -20,5 +20,5 @@ fi
 apptainer exec --nv --bind \
  /itet-stor/sdauncey/net_scratch:/itet-stor/sdauncey/net_scratch,/scratch/sdauncey:/scratch/sdauncey \
  /scratch/sdauncey/sams_favorite_build.sif \
- bash training_random_base_model/launch_distributed.sh 147M 8 $UPDOWN_SAMPLER 42
+ bash training_random_base_model/launch_distributed.sh 147M 8 $UPDOWN_SAMPLER 43
 

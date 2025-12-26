@@ -27,8 +27,8 @@ class NawrotDownsampler(nn.Module):
 
 
         return x_downsampled, position_ids_downsampled, down_merge_dst
-    
-    
+ 
+ 
     def downsample_x(self, x: torch.Tensor, hard_boundaries: torch.Tensor) -> torch.Tensor:
         """Downsamples the input tensor x using the Nawrot et al. 2023 method."""
         # x is of shape [bs, seq_len, emb_dim], but nawrot_downsampler expects [seq_len, bs, emb_dim]

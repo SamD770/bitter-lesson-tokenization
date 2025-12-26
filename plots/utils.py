@@ -101,7 +101,7 @@ def gate_probs_html(txt, gate_probs):
     # Add a legend for the colorbar
     colorbar_html = f'''
     <div style="margin-bottom:10px;">
-        <div style="font-family:monospace; font-size:12px; margin-bottom:3px;">Probability: Low to High</div>
+        <div style="font-family:monospace; font-size:12px; margin-bottom:3px;">Token boundary probability: Low to High</div>
         <div style="font-family:monospace; font-size:14px;">{colorbar}</div>
     </div>
     '''

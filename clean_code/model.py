@@ -232,7 +232,7 @@ class DownsampleRateEmbedding(nn.Module):
         return embedding
 
 
-class FlexibleBitterLLM(nn.Module):
+class AutoregressiveUnet(nn.Module):
     # Use Gemma2DecoderLayer as a drop in replacement for the TransformerEncoderLayer, with RoPE and sliding window pre-implemented.
     # Also uses a causal mask.
     def __init__(
@@ -844,7 +844,7 @@ class BatchLimitCondition(CheckpointCondition):
 class BytesLimitCondition(CheckpointCondition):
     def __init__(self, bytes_limit):
         self.bytes_limit = bytes_limit
-        
+
     def __call__(self, all_bytes_elapsed, non_padding_bytes_elapsed, flops_elapsed, effective_batches_elapsed):
         return non_padding_bytes_elapsed >= self.bytes_limit
 
@@ -882,7 +882,7 @@ def aggregate_val_metrics(val_metrics):
     return aggregated_val_metrics
 
 
-def flexible_training_loop_warm_start_accelerate(
+def training_loop(
         model, 
         optimizer, 
         lr_scheduler, 
