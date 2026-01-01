@@ -1,7 +1,7 @@
 # The same as experiment_6.py, but with a different discount rate (0.9) with half the number of batches and a smaller print every to speed up training.
 from transformers import AutoTokenizer
 from torch import nn
-from typing import List
+from typing import List, Tuple
 
 import random
 
@@ -52,11 +52,17 @@ def parameter_count_string(module):
 def get_merge_dst(gate_samples: torch.Tensor) -> torch.Tensor:
     """
     Returns (merge_dst, dst_idx) the merge destination for each token in the sequence and the number of unique merge destinations.
-    Input is a tensor of shape (batch_size, sequence_length) with 0 tokens are merged into the next 1 token.
+    Input is a tensor of shape (batch_size, sequence_length) with 0 tokens are merged into the next 1 token. 
+    An implicit final merge destination is used irrespective of whether the last sequence index is 0 or 1.
     mapping:
     1 0 1 1 0 1 1 0 0 0 1
     |   | |   | |       |
     0 1 1 2 3 3 4 5 5 5 5
+    input:
+        gate_samples B S
+    returns:
+        merge_dst B S
+        n_dst B
     """
     # "cycle" the gate samples, appending a zero to the beginning of each batch and ignoring the last gate.
     preceding_gate_samples = torch.cat([torch.zeros_like(gate_samples[:, -1]).unsqueeze(1), gate_samples[:, :-1]], dim=1).to(dtype=torch.long)
@@ -94,17 +100,46 @@ def discounted_rewards_torch(rewards, discount):
     return discounted_rewards
 
 
+class Gater(nn.Module):
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Arguments:
+            x B S D
+        Returns:
+            down_gate_logits B S
+            down_gate_probs B S
+            gate_samples B S
+        """
+        raise NotImplementedError()
 
 
-class DownGater(nn.Module):
-    def __init__(self, embedding_dim: int, downsample_rate: float):
-        super().__init__()
-        self.embedding_dim = embedding_dim
-        self.downsample_rate = downsample_rate
+class Donwsampler(nn.Module):
+    def forward(self, x: torch.Tensor, position_ids: torch.Tensor, gate_samples: torch.Tensor) -> torch.Tensor:
+        """
+        Arguments:
+            x B S D
+            position_ids B S
+            gate_samples B S
+        Returns:
+            x_downsampled B S' D
+            position_ids_downsampled B S'
+        """
+        raise NotImplementedError()
 
-    def gate_samples(self, down_gate_probs: torch.Tensor) -> torch.Tensor:
-        gate_samples = torch.bernoulli(down_gate_probs)
-        return gate_samples
+
+class Upsampler(nn.Module):
+    def forward(self, x, x_downsampled, y_downsampled, down_gate_samples, down_gate_probs) -> torch.Tensor:
+        """
+        Arguments:
+            x B S D
+            x_downsampled B S' D
+            y_downsampled B S' D
+            gate_samples B S
+            down_gate_probs B S
+        Returns:
+            y B S D
+        """
+        raise NotImplementedError()
 
 
 class LinearGater(nn.Module):
@@ -208,6 +243,68 @@ class ExactRandomGater(nn.Module):
         return gate_logits, gate_probs, gate_samples
 
 
+def get_boundary_indices(gate_samples: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Gets the indices of the boundary for each batch. Pads with -1.
+    1 0 0 1 1
+    1 1 0 0 0
+    ->
+    0 3 4
+    0 1 -1
+    inputs:
+        gate_samples B S
+    returns:
+        boundary_token_indices B S'
+        merge_dst B S'
+    """
+    batch_size, seq_len = gate_samples.shape
+    merge_dst, n_dst = get_merge_dst(gate_samples)
+    n_dst_max = n_dst.max().item()
+    # We use the trick that:
+    # if: gate_samples = 1  0  1  1  0  1  1  0  0
+    # then:        src = 0 -1  2  3 -1  5  6 -1 -1
+    # and so reducing with max and index:
+    #        merge_dst = 0  1  1  2  3  3  4  5  5
+    # gives: boundary_indices = 0 2 3 5 6 -1
+    boundary_indices = torch.ones(batch_size, n_dst_max, dtype=torch.long).to(gate_samples.device) * -1
+    src = torch.arange(seq_len, device=gate_samples.device).unsqueeze(0).expand(batch_size, -1)
+    src = src * gate_samples - 1 + gate_samples
+    boundary_indices = torch.scatter_reduce(boundary_indices, dim=1, index=merge_dst, src=src, reduce="max", include_self=False)
+    return boundary_indices, merge_dst
+
+
+def select(x: torch.Tensor, boundary_indices: torch.Tensor, pad_value=0.0) -> torch.Tensor:
+    """
+    Selects the tokens according to the boundary token indices.
+    1 2 3 4 5
+    0 3 4
+    ->
+    1 4 5
+    inputs:
+        x B S [D]
+        boundary_token_indices B S'
+    returns:
+        x_selected B S' D
+    """
+    # Add an implicit embedding dimension if not there already 
+    if len(x.shape) == 2:
+        return select(x.unsqueeze(-1), boundary_indices, pad_value=pad_value).squeeze(-1)
+
+    batch_size, seq_len, embedding_dim = x.shape
+    _, new_seq_len = boundary_indices.shape
+
+    boundary_indices = boundary_indices.unsqueeze(-1).expand(-1, -1, embedding_dim)
+
+    # boundary_indices is padded with -1, which we need to wrap to avoid errors.
+    pad_mask = (boundary_indices == -1)
+
+    boundary_indices = boundary_indices.masked_fill(pad_mask, 0)
+    x_selected = torch.gather(x, dim=1, index=boundary_indices)
+    x_selected = x_selected.masked_fill(pad_mask, pad_value)
+
+    return x_selected
+
+
 class SelectTokenDownsampler(nn.Module):
     def forward(self, x: torch.Tensor, position_ids: torch.Tensor, gate_samples: torch.Tensor) -> torch.Tensor:
         """
@@ -217,32 +314,19 @@ class SelectTokenDownsampler(nn.Module):
         ->
         1 4 5
         inputs:
-        x.shape = (batch_size, seq_len, embedding_dim)
-        position_ids.shape = (batch_size, seq_len)
-        gate_samples.shape = (batch_size, seq_len)
+            x = (batch_size, seq_len, embedding_dim)
+            position_ids = (batch_size, seq_len)
+            gate_samples = (batch_size, seq_len)
         returns:
-        x_downsampled.shape = (batch_size, n_dst, embedding_dim)
-        position_ids_downsampled.shape = (batch_size, n_dst)
+            x_downsampled = (batch_size, n_dst, embedding_dim)
+            position_ids_downsampled = (batch_size, n_dst)
         """
+        boundary_indices, merge_dst = get_boundary_indices(gate_samples)
 
-        batch_size, _, embedding_dim = x.shape
-        down_merge_dst, n_dst = get_merge_dst(gate_samples)
+        x_downsampled = select(x, boundary_indices)
+        position_ids_downsampled = select(position_ids, boundary_indices)
 
-        # Merge the tokens into the next token where the gate is 1.)
-        max_n_dst = n_dst.max().item()
-
-        # Also merge the position ids.
-        position_ids_downsampled = torch.zeros(batch_size, max_n_dst, dtype=position_ids.dtype).to(x.device)
-        position_ids_downsampled = torch.scatter_reduce(position_ids_downsampled, dim=1, index=down_merge_dst, src=position_ids, reduce="max", include_self=False)
-
-        # Merge the downsampled tokens.
-        # Use the trick: 1 2 3 4 5 * 1 0 0 1 1 = 1 0 0 4 5 which can then be reduced by sum.
-        x = x * gate_samples.unsqueeze(-1)
-        down_merge_dst = down_merge_dst.unsqueeze(-1).expand(-1, -1, embedding_dim)
-        x_downsampled = torch.zeros(batch_size, max_n_dst, embedding_dim, dtype=x.dtype).to(x.device)
-        x_downsampled = torch.scatter_reduce(x_downsampled, dim=1, index=down_merge_dst, src=x, reduce="sum", include_self=False)
-
-        return x_downsampled, position_ids_downsampled, down_merge_dst
+        return x_downsampled, position_ids_downsampled, merge_dst
 
 
 class AverageTokenDownsampler(nn.Module):
@@ -279,27 +363,6 @@ class AverageTokenDownsampler(nn.Module):
         x_downsampled = torch.scatter_reduce(x_downsampled, dim=1, index=down_merge_dst, src=x, reduce="mean", include_self=False)
 
         return x_downsampled, position_ids_downsampled, down_merge_dst
-
-
-# class DistributeTokenUpsampler(nn.Module):
-#     def forward(self, x: torch.Tensor, gate_samples: torch.Tensor) -> torch.Tensor:
-#         """
-#         Distributes the values of x to the next token where the gate is 1.
-#         1 2 3
-#         1 0 0 1 1
-#         ->
-#         1 1 1 2 3
-#         """
-#         batch_size, _, embedding_dim = x.shape
-#         # Upsample by removing the first token merge group, shifting all token groups down and adding another one token group at the end.
-#         up_gate_samples = gate_samples[:, 1:]
-#         up_gate_samples = torch.cat([up_gate_samples, torch.ones(batch_size, 1, dtype=up_gate_samples.dtype).to(up_gate_samples.device)], dim=1)
-#         up_merge_dst, _ = get_merge_dst(up_gate_samples)
-#         up_merge_dst = up_merge_dst.unsqueeze(-1).expand(-1, -1, embedding_dim)
-
-#         x_upsampled = torch.gather(x, dim=1, index=up_merge_dst)
-
-#         return x_upsampled, up_merge_dst
 
 
 def distribute(x, gate_samples) -> torch.Tensor:
