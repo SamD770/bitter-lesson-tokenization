@@ -1,78 +1,230 @@
 import torch
 from torch import nn
 from typing import Tuple
-from copy import deepcopy
-# Problem: different methods require different things for up/downsampling beyond probs, logits and samples.
-# We can abstract this later.
 import torch.nn.functional as F
+
+from .hnet_downsampler import RoutingModule, ChunkLayer, DeChunkLayer
+from .modules import get_merge_dst
 
 
 class HNetGater(nn.Module):
+    """
+    Wraps HNet's RoutingModule to produce gating outputs compatible with the repository interface.
+    
+    The RoutingModule computes boundary probabilities based on cosine similarity between
+    adjacent token embeddings. Unlike learned gaters, it doesn't use a downsample_rate parameter.
+    """
+    
     def __init__(
         self, 
-        embedding_dim: int, 
-        downsample_rate: float, 
-        qk_identity_init: float = True
+        embedding_dim: int,
+        downsample_rate: float = 0.25,  # Ignored, kept for interface compatibility
     ):
-        self.q_proj = nn.Linear(embedding_dim, embedding_dim, bias=False)
-        self.k_proj = nn.Linear(embedding_dim, embedding_dim, bias=False)
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.downsample_rate = downsample_rate  # Not used by RoutingModule
+        self.routing_module = RoutingModule(d_model=embedding_dim)
 
-        # In the H-net code, this initialization is used for the Gater.
-        # https://github.com/goombalab/hnet/blob/main/hnet/modules/dc.py
-        if qk_identity_init:
-            with torch.no_grad():
-                self.q_proj_layer.weight.copy_(torch.eye(embedding_dim))
-                self.k_proj_layer.weight.copy_(torch.eye(embedding_dim))
-                self.q_proj_layer.weight._no_reinit = True
-                self.k_proj_layer.weight._no_reinit = True
-
-
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, downsample_rate=None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Arguments:
-            x B S D
+            x: (B, S, D) input embeddings
+            downsample_rate: ignored (kept for interface compatibility)
         Returns:
-            gate_logits B S
-            gate_probs B S
-            gate_samples B S
+            gate_logits: (B, S, 1) inverse sigmoid of gate probabilities
+            gate_probs: (B, S, 1) probability of boundary at each position
+            gate_samples: (B, S, 1) binary boundary decisions (0 or 1)
         """
-        batch_size, _, _ = x.shape
+        batch_size, seq_len, _ = x.shape
+        
+        # Create mask of all True (no padding, batched mode)
+        mask = torch.ones(batch_size, seq_len, dtype=torch.bool, device=x.device)
+        
+        # Call RoutingModule (batched mode, not sequence packed)
+        routing_output = self.routing_module(
+            hidden_states=x,
+            cu_seqlens=None,
+            mask=mask,
+            inference_params=None
+        )
+        
+        # Extract outputs:
+        # boundary_prob has shape (B, S, 2) where [..., 1] is the boundary probability
+        # boundary_mask has shape (B, S) and is boolean
+        gate_probs = routing_output.boundary_prob[..., 1]  # (B, S)
+        gate_samples = routing_output.boundary_mask.float()  # (B, S)
+        
+        # Compute logits as inverse sigmoid, with clamping to avoid numerical issues
+        gate_probs_clamped = torch.clamp(gate_probs, min=1e-6, max=1 - 1e-6)
+        gate_logits = torch.log(gate_probs_clamped / (1 - gate_probs_clamped))
+        
+        # Add trailing dimension for compatibility with repository interface
+        gate_logits = gate_logits.unsqueeze(-1)  # (B, S, 1)
+        gate_probs = gate_probs.unsqueeze(-1)  # (B, S, 1)
+        gate_samples = gate_samples.unsqueeze(-1)  # (B, S, 1)
+        
+        return gate_logits, gate_probs, gate_samples
 
-        q = self.q_proj(x)
-        k = self.k_proj(x)
 
-        p = (1 - F.cosine_similarity(q[:, 1:], k[:, :-1], dim=-1)) / 2
-        p = torch.cat([torch.ones(batch_size,), p])
-        b = (p > 0.5)
+class HNetDownsampler(nn.Module):
+    """
+    Wraps HNet's ChunkLayer to downsample embeddings at boundary positions.
+    
+    Selects tokens where gate_samples == 1 (boundary positions).
+    """
+    
+    def __init__(self):
+        super().__init__()
+        self.chunk_layer = ChunkLayer()
+    
+    def forward(
+        self, 
+        x: torch.Tensor, 
+        position_ids: torch.Tensor, 
+        gate_samples: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Arguments:
+            x: (B, S, D) input embeddings
+            position_ids: (B, S) position indices
+            gate_samples: (B, S) binary boundary decisions (0 or 1)
+        Returns:
+            x_downsampled: (B, S', D) downsampled embeddings
+            position_ids_downsampled: (B, S') downsampled position indices
+            down_merge_dst: (B, S, 1) merge destination for each token
+        """
+        batch_size, seq_len, embedding_dim = x.shape
+        
+        # Convert gate_samples to boolean boundary_mask
+        boundary_mask = gate_samples.bool()  # (B, S)
+        
+        # Create mask of all True (batched mode, no padding)
+        mask = torch.ones(batch_size, seq_len, dtype=torch.bool, device=x.device)
+        
+        # Call ChunkLayer (returns next_hidden_states, next_cu_seqlens, next_max_seqlen, next_mask)
+        x_downsampled, _, _, next_mask = self.chunk_layer(
+            hidden_states=x,
+            boundary_mask=boundary_mask,
+            cu_seqlens=None,
+            mask=mask
+        )
+        
+        # Downsample position_ids using the same logic as ChunkLayer
+        # Count number of boundary tokens per batch
+        num_tokens = boundary_mask.sum(dim=-1)  # (B,)
+        next_max_seqlen = int(num_tokens.max())
+        
+        # Create indices for sorting (push non-boundary tokens to the end)
+        token_idx = (
+            torch.arange(seq_len, device=x.device)[None, :] 
+            + (~boundary_mask).long() * seq_len
+        )
+        seq_sorted_indices = torch.argsort(token_idx, dim=1)
+        
+        # Gather position_ids using sorted indices
+        position_ids_downsampled = torch.gather(
+            position_ids,
+            dim=1,
+            index=seq_sorted_indices[:, :next_max_seqlen]
+        )
+        
+        # Compute merge_dst for compatibility with repository interface
+        down_merge_dst, _ = get_merge_dst(gate_samples)
+        down_merge_dst = down_merge_dst.unsqueeze(-1)  # (B, S, 1)
+        
+        return x_downsampled, position_ids_downsampled, down_merge_dst
 
-        gate_probs = p
-        gate_samples = b
-        gate_logits = torch.log(gate_probs / (1 - gate_probs))
-
-        return gate_logits, gate_probs, gate_samples,
-
-
-# problem 2: need to compute the ema in a stateful way:
-
-# z_t = p_t x_t + (1 - p_t) x
 
 class HNetUpsampler(nn.Module):
-    def forward(self, x, x_downsampled, y_downsampled, down_gate_samples, down_gate_probs) -> torch.Tensor:
+    """
+    Wraps HNet's DeChunkLayer to upsample embeddings back to full sequence length.
+    
+    Uses EMA-based deaggregation (via Mamba2 kernel) to spread information from
+    boundary positions to all positions, then adds a residual connection.
+    """
+    
+    def __init__(
+        self, 
+        embedding_dim: int,
+        dtype: torch.dtype = torch.bfloat16,
+        block_size: int = 256,
+        headdim: int = 32,
+    ):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.dechunk_layer = DeChunkLayer(
+            d_model=embedding_dim,
+            dtype=dtype,
+            block_size=block_size,
+            headdim=headdim,
+        )
+        
+        # Residual projection (following HNet's pattern)
+        # Initialize to zeros so initially the residual has no effect
+        self.residual_proj = nn.Linear(embedding_dim, embedding_dim)
+        nn.init.zeros_(self.residual_proj.weight)
+        nn.init.zeros_(self.residual_proj.bias)
+    
+    def forward(
+        self, 
+        x: torch.Tensor, 
+        x_downsampled: torch.Tensor, 
+        y_downsampled: torch.Tensor, 
+        down_gate_samples: torch.Tensor, 
+        down_gate_probs: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Arguments:
-            x B S D
-            x_downsampled B S' D
-            y_downsampled B S' D
-            gate_samples B S
-            down_gate_probs B S
+            x: (B, S, D) original byte-level embeddings (before downsampling)
+            x_downsampled: (B, S', D) downsampled input embeddings (not used by HNet)
+            y_downsampled: (B, S', D) processed downsampled embeddings
+            down_gate_samples: (B, S) or (B, S, 1) binary boundary decisions
+            down_gate_probs: (B, S) or (B, S, 1) boundary probabilities
         Returns:
-            y B S D
+            y: (B, S, D) upsampled output embeddings
+            up_merge_dst: (B, S, 1) merge destination for each token
         """
-        z_hat = x_downsampled
-        gate_probs_downsampled = ...
-
-        # Todo: compute the ema z_t = p_t z_hat_t + (1 - p_t) z_{t-1}
+        batch_size, seq_len, _ = x.shape
         
+        # Handle potential trailing dimension
+        if down_gate_samples.dim() == 3:
+            down_gate_samples = down_gate_samples.squeeze(-1)  # (B, S)
+        if down_gate_probs.dim() == 3:
+            down_gate_probs = down_gate_probs.squeeze(-1)  # (B, S)
         
-        raise NotImplementedError()
-
+        # Convert gate_samples to boolean boundary_mask
+        boundary_mask = down_gate_samples.bool()  # (B, S)
+        
+        # Reconstruct boundary_prob tensor: (B, S, 2)
+        # boundary_prob[..., 0] = 1 - gate_probs (no boundary)
+        # boundary_prob[..., 1] = gate_probs (boundary)
+        boundary_prob = torch.stack([1 - down_gate_probs, down_gate_probs], dim=-1)
+        
+        # Create mask of all True (batched mode, no padding)
+        mask = torch.ones(batch_size, seq_len, dtype=torch.bool, device=x.device)
+        
+        # Call DeChunkLayer to spread y_downsampled back to full sequence
+        y_dechunked = self.dechunk_layer(
+            hidden_states=y_downsampled,
+            boundary_mask=boundary_mask,
+            boundary_prob=boundary_prob,
+            cu_seqlens=None,
+            mask=mask,
+            inference_params=None
+        )
+        
+        # Apply residual connection (following HNet's pattern)
+        residual = self.residual_proj(x)
+        y = y_dechunked + residual
+        
+        # Compute up_merge_dst for compatibility
+        # For upsampling, shift gate_samples to align with the "distribute" pattern
+        up_gate_samples = down_gate_samples[:, 1:]
+        up_gate_samples = torch.cat([
+            up_gate_samples, 
+            torch.ones(batch_size, 1, dtype=up_gate_samples.dtype, device=up_gate_samples.device)
+        ], dim=1)
+        up_merge_dst, _ = get_merge_dst(up_gate_samples)
+        up_merge_dst = up_merge_dst.unsqueeze(-1)  # (B, S, 1)
+        
+        return y, up_merge_dst

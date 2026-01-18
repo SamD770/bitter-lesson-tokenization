@@ -35,7 +35,7 @@ from .modules import (
     discounted_rewards_torch
 )
 from .conditional_sequential import SequentiallyDependentRandomGater
-from transformers.models.gemma2.modeling_gemma2 import Gemma2Model, Gemma2Config, Gemma2RotaryEmbedding, HybridCache, StaticCache, Cache
+from transformers.models.gemma2.modeling_gemma2 import Gemma2Model, Gemma2Config, Gemma2RotaryEmbedding #, HybridCache, StaticCache, Cache
 from .downsample_rate_scheduler import DefaultDownsampleRateScheduler
 
 from typing import Optional, Dict, Union, List
@@ -76,85 +76,88 @@ def get_merge_dst(gate_samples: torch.Tensor) -> torch.Tensor:
     return merge_dst, n_dst
 
 
-class FlexibleCache(Cache):
-    def __init__(
-        self,
-        config,
-        max_batch_size: int,
-        max_cache_len: Optional[int] = None,
-        device: Union[torch.device, str, None] = None,
-        dtype: torch.dtype = torch.float32,
-        layer_device_map: Optional[Dict[int, Union[str, torch.device, int]]] = None,
-    ) -> None:
-        """Work in progress"""
-        super().__init__()
-        if not hasattr(config, "sliding_window") or config.sliding_window is None:
-            raise ValueError(
-                "Setting `cache_implementation` to 'sliding_window' requires the model config supporting "
-                "sliding window attention, please check if there is a `sliding_window` field in the model "
-                "config and it's not set to None."
-            )
-        self.max_cache_len = max_cache_len
-        self.max_batch_size = max_batch_size
-        # Some model define a custom `head_dim` != config.hidden_size // config.num_attention_heads
-        self.head_dim = (
-            config.head_dim if hasattr(config, "head_dim") else config.hidden_size // config.num_attention_heads
-        )
+# class FlexibleCache(Cache):
+#     def __init__(
+#         self,
+#         config,
+#         max_batch_size: int,
+#         max_cache_len: Optional[int] = None,
+#         device: Union[torch.device, str, None] = None,
+#         dtype: torch.dtype = torch.float32,
+#         layer_device_map: Optional[Dict[int, Union[str, torch.device, int]]] = None,
+#     ) -> None:
+#         """Work in progress"""
+#         super().__init__()
+#         if not hasattr(config, "sliding_window") or config.sliding_window is None:
+#             raise ValueError(
+#                 "Setting `cache_implementation` to 'sliding_window' requires the model config supporting "
+#                 "sliding window attention, please check if there is a `sliding_window` field in the model "
+#                 "config and it's not set to None."
+#             )
+#         self.max_cache_len = max_cache_len
+#         self.max_batch_size = max_batch_size
+#         # Some model define a custom `head_dim` != config.hidden_size // config.num_attention_heads
+#         self.head_dim = (
+#             config.head_dim if hasattr(config, "head_dim") else config.hidden_size // config.num_attention_heads
+#         )
 
-        self._dtype = dtype
-        self.num_key_value_heads = (
-            config.num_attention_heads if config.num_key_value_heads is None else config.num_key_value_heads
-        )
+#         self._dtype = dtype
+#         self.num_key_value_heads = (
+#             config.num_attention_heads if config.num_key_value_heads is None else config.num_key_value_heads
+#         )
 
-        # This is the only line we change from the original implementation.
-        self.is_sliding = torch.tensor(
-            [True] * config.n_down_layers + [False] * config.n_mid_layers + [True] * config.n_up_layers, dtype=torch.bool
-        )
+#         # This is the only line we change from the original implementation.
+#         self.is_sliding = torch.tensor(
+#             [True] * config.n_down_layers + [False] * config.n_mid_layers + [True] * config.n_up_layers, dtype=torch.bool
+#         )
 
-        self.key_cache: List[torch.Tensor] = []
-        self.value_cache: List[torch.Tensor] = []
-        global_cache_shape = (self.max_batch_size, self.num_key_value_heads, max_cache_len, self.head_dim)
-        sliding_cache_shape = (
-            self.max_batch_size,
-            self.num_key_value_heads,
-            min(config.sliding_window, max_cache_len),
-            self.head_dim,
-        )
-        device = torch.device(device) if device is not None and isinstance(device, str) else None
-        for i in range(config.num_hidden_layers):
-            if layer_device_map is not None:
-                layer_device = layer_device_map[i]
-            else:
-                layer_device = device
-            # Note: `mark_static_address` is used to tag the cache as an fixed data pointer, preventing cuda graph
-            # breaks when updating the cache.
-            cache_shape = global_cache_shape if not self.is_sliding[i] else sliding_cache_shape
-            new_layer_key_cache = torch.zeros(cache_shape, dtype=self._dtype, device=layer_device)
-            new_layer_value_cache = torch.zeros(cache_shape, dtype=self._dtype, device=layer_device)
-            torch._dynamo.mark_static_address(new_layer_key_cache)
-            torch._dynamo.mark_static_address(new_layer_value_cache)
-            self.key_cache.append(new_layer_key_cache)
-            self.value_cache.append(new_layer_value_cache)
+#         self.key_cache: List[torch.Tensor] = []
+#         self.value_cache: List[torch.Tensor] = []
+#         global_cache_shape = (self.max_batch_size, self.num_key_value_heads, max_cache_len, self.head_dim)
+#         sliding_cache_shape = (
+#             self.max_batch_size,
+#             self.num_key_value_heads,
+#             min(config.sliding_window, max_cache_len),
+#             self.head_dim,
+#         )
+#         device = torch.device(device) if device is not None and isinstance(device, str) else None
+#         for i in range(config.num_hidden_layers):
+#             if layer_device_map is not None:
+#                 layer_device = layer_device_map[i]
+#             else:
+#                 layer_device = device
+#             # Note: `mark_static_address` is used to tag the cache as an fixed data pointer, preventing cuda graph
+#             # breaks when updating the cache.
+#             cache_shape = global_cache_shape if not self.is_sliding[i] else sliding_cache_shape
+#             new_layer_key_cache = torch.zeros(cache_shape, dtype=self._dtype, device=layer_device)
+#             new_layer_value_cache = torch.zeros(cache_shape, dtype=self._dtype, device=layer_device)
+#             torch._dynamo.mark_static_address(new_layer_key_cache)
+#             torch._dynamo.mark_static_address(new_layer_value_cache)
+#             self.key_cache.append(new_layer_key_cache)
+#             self.value_cache.append(new_layer_value_cache)
 
 
-    def update(self, *args, **kwargs):
-        return HybridCache.update(self, *args, **kwargs)
+#     def update(self, *args, **kwargs):
+#         return HybridCache.update(self, *args, **kwargs)
     
-    def _sliding_update(self, *args, **kwargs):
-        return HybridCache._sliding_update(self, *args, **kwargs)
+#     def _sliding_update(self, *args, **kwargs):
+#         return HybridCache._sliding_update(self, *args, **kwargs)
     
-    def _static_update(self, *args, **kwargs):
-        return HybridCache._static_update(self, *args, **kwargs)
+#     def _static_update(self, *args, **kwargs):
+#         return HybridCache._static_update(self, *args, **kwargs)
     
-    def get_max_cache_shape(self) -> Optional[int]:
-        return HybridCache.get_max_cache_shape(self)
+#     def get_max_cache_shape(self) -> Optional[int]:
+#         return HybridCache.get_max_cache_shape(self)
 
-    def get_seq_length(self, layer_idx: Optional[int] = 0):
-        return HybridCache.get_seq_length(self, layer_idx)
+#     def get_seq_length(self, layer_idx: Optional[int] = 0):
+#         return HybridCache.get_seq_length(self, layer_idx)
 
-    def reset(self):
-        return HybridCache.reset(self)
+#     def reset(self):
+#         return HybridCache.reset(self)
 
+HybridCache = ... # TODO: refactor to work with new repo
+StaticCache = ... # TODO: refactor to work with new repo
+FlexibleCache = ... # TODO: refactor to work with new repo
 
 # Copied from Gemma2Model, used to create the causal mask.
 @torch.no_grad()
@@ -254,6 +257,7 @@ class AutoregressiveUnet(nn.Module):
         n_up_layers=2, 
         flash_attn=True, 
         compile=False,
+        upsampler_kwargs={},
     ):
         super().__init__()
         self.embedding_dim = embedding_dim
@@ -323,7 +327,7 @@ class AutoregressiveUnet(nn.Module):
             self.downsample_rate_embedding = None
 
         self.downsampler = DownSamplerClass()
-        self.upsampler = UpsamplerClass()
+        self.upsampler = UpsamplerClass(**upsampler_kwargs)
         self.rotary_emb = Gemma2RotaryEmbedding(config=self.byte_layer_config)
 
         # Pre-compute these for the flop counting.

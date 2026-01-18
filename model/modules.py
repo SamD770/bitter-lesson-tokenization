@@ -114,7 +114,7 @@ class Gater(nn.Module):
 
 
 class Donwsampler(nn.Module):
-    def forward(self, x: torch.Tensor, position_ids: torch.Tensor, gate_samples: torch.Tensor) -> torch.Tensor:
+    def forward() -> torch.Tensor:
         """
         Arguments:
             x B S D
