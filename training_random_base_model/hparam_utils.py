@@ -1,8 +1,9 @@
 """
 Define hyperparameters for a series of models with sizes 16M -> 346M. For a standardised pretraining run.
 """
-from clean_code.flexible_bitter_llm import SelectTokenDownsampler, ExactRandomGater, FlexibleBitterLLM, DistributeDeviationUpsampler
-from clean_code.utils import parameter_count_string
+from model.model import AutoregressiveUnet
+from model.modules import SelectTokenDownsampler, ExactRandomGater, DistributeDeviationUpsampler
+from model.utils import parameter_count_string
 
 model_sizes = ["18M", "20M", "32M", "40M", "73M", "90M", "130M", "147M", "346M"]
 
@@ -176,7 +177,7 @@ def get_optimization_kwargs(model_size):
 
 def print_model_hparams(model_size):
     model_kwargs = get_model_kwargs(model_size)
-    model = FlexibleBitterLLM(**model_kwargs)
+    model = AutoregressiveUnet(**model_kwargs)
     print(f"Model {model_size} has {parameter_count_string(model)} parameters")
 
 if __name__ == "__main__":

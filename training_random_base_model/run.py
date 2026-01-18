@@ -1,21 +1,25 @@
 from training_random_base_model.hparam_utils import get_model_kwargs, get_optimization_kwargs, model_sizes, training_loop_hparam_defaults
 from data_processing import split_fineweb
 
-from clean_code.utils import parameter_count_string
-from clean_code.flexible_bitter_llm import (
-    FlexibleBitterLLM, 
-    flexible_training_loop_warm_start_accelerate, 
-    ExactRandomGater,
-    LinearGater,
+from model.utils import parameter_count_string
+from model.model import (
+    AutoregressiveUnet, 
+    training_loop,
     BytesLimitCondition,
-    DistributeAddUpsampler, 
     save_checkpoint,
     load_checkpoint,
 )
+from model.modules import (
+    ExactRandomGater,
+    LinearGater,
+    DistributeAddUpsampler, 
+)
 
-from clean_code.nawrot_plugin import NawrotDownsampler, NawrotUpsampler, NawrotGater
+from model.nawrot_plugin import NawrotDownsampler, NawrotUpsampler, NawrotGater
 
-from clean_code.conditional_sequential import ScaledSequentialyDependentLinearGater, OptimizedSequentialyDependentLinearGater
+from model.hnet_plugin import  HNetDownsampler, HNetUpsampler, HNetGater
+
+from model.conditional_sequential import ScaledSequentialyDependentLinearGater, OptimizedSequentialyDependentLinearGater
 
 import os
 
@@ -166,6 +170,20 @@ def add_nawrot_training_loop_kwargs(training_loop_kwargs):
     return training_loop_kwargs
 
 
+def add_hnet_model_kwargs(model_kwargs):
+    model_kwargs["GaterClass"] = HNetGater
+    model_kwargs["DownSamplerClass"] = HNetDownsampler
+    model_kwargs["UpsamplerClass"] = HNetUpsampler
+    model_kwargs["upsampler_kwargs"] = {"embedding_dim": model_kwargs["embedding_dim"]}
+    return model_kwargs
+
+
+def add_hnet_training_loop_kwargs(training_loop_kwargs):
+    training_loop_kwargs["learn_gating"] = True # For the consistency loss
+    training_loop_kwargs["relative_gating_loss_weight"] = 0.0 # So no policy gradient is used.
+    return training_loop_kwargs
+
+
 def add_linear_model_kwargs(model_kwargs):
     model_kwargs["GaterClass"] = LinearGater
     return model_kwargs
@@ -225,7 +243,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size used on each GPU")
     parser.add_argument("--resume_checkpoint", type=str, default=None, help="Checkpoint to resume training from")
     parser.add_argument("--aspect_ratio", type=int, default=None, help="Aspect ratio to train at")
-    parser.add_argument("--updownsampler", type=str, default="random", choices=["random","sequential", "nawrot"], help="Upsampler/Downsampler/Gater to use")
+    parser.add_argument("--updownsampler", type=str, default="random", choices=["random","sequential", "nawrot", "hnet"], help="Upsampler/Downsampler/Gater to use")
     args = parser.parse_args()
 
 
@@ -260,6 +278,9 @@ def main():
     elif args.updownsampler == "nawrot":
         add_nawrot_model_kwargs(model_kwargs)
         add_nawrot_training_loop_kwargs(training_loop_kwargs)
+    elif args.updownsampler == "hnet":
+        add_hnet_model_kwargs(model_kwargs)
+        add_hnet_training_loop_kwargs(training_loop_kwargs)
 
 
     delta_optimization_kwargs, checkpoint_conditions = \
@@ -317,7 +338,7 @@ def main():
 
     train_dataloader, val_dataloader = get_dataloaders(optimization_kwargs["batch_size"], accelerator.is_main_process, accelerator.num_processes)
 
-    model = FlexibleBitterLLM(**model_kwargs).to(device, dtype=torch.bfloat16)
+    model = AutoregressiveUnet(**model_kwargs).to(device, dtype=torch.bfloat16)
 
 
     if accelerator.is_main_process:
@@ -340,7 +361,7 @@ def main():
 
     for checkpoint_condition in checkpoint_conditions:
 
-        elapsed_vals = flexible_training_loop_warm_start_accelerate(
+        elapsed_vals = training_loop(
             model, 
             optimizer, 
             scheduler, 
