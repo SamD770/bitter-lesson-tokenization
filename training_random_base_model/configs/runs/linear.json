@@ -1,0 +1,5 @@
+{
+  "learn_gating": true,
+  "discount_rate": 0.99,
+  "early_exit_advantage_estimate": true
+}

@@ -1,0 +1,32 @@
+{
+  "random": {
+    "GaterClass": "ExactRandomGater",
+    "DownSamplerClass": "SelectTokenDownsampler",
+    "UpsamplerClass": "DistributeAddUpsampler"
+  },
+  "nawrot": {
+    "GaterClass": "NawrotGater",
+    "DownSamplerClass": "NawrotDownsampler",
+    "UpsamplerClass": "NawrotUpsampler"
+  },
+  "hnet": {
+    "GaterClass": "HNetGater",
+    "DownSamplerClass": "HNetDownsampler",
+    "UpsamplerClass": "HNetUpsampler",
+    "upsampler_kwargs_from_embedding_dim": true
+  },
+  "linear": {
+    "GaterClass": "LinearGater",
+    "DownSamplerClass": "SelectTokenDownsampler",
+    "UpsamplerClass": "DistributeDeviationUpsampler"
+  },
+  "sequential": {
+    "GaterClass": "ScaledSequentialyDependentLinearGater",
+    "DownSamplerClass": "SelectTokenDownsampler",
+    "UpsamplerClass": "DistributeAddUpsampler",
+    "gater_kwargs": {
+      "scale_factor": 0.0625,
+      "filter_size": 8
+    }
+  }
+}

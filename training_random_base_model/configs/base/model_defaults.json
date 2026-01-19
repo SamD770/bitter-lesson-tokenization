@@ -1,0 +1,8 @@
+{
+  "vocab_size": 320,
+  "downsample_rate": 0.2,
+  "sliding_window": 64,
+  "GaterClass": "ExactRandomGater",
+  "DownSamplerClass": "SelectTokenDownsampler",
+  "UpsamplerClass": "DistributeDeviationUpsampler"
+}

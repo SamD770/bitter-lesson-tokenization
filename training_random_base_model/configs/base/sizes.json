@@ -1,0 +1,72 @@
+{
+  "XM": {
+    "embedding_dim": 256,
+    "num_heads": 6,
+    "n_down_layers": 2,
+    "n_mid_layers": 4,
+    "n_up_layers": 2
+  },
+  "18M": {
+    "embedding_dim": 384,
+    "num_heads": 6,
+    "n_down_layers": 2,
+    "n_mid_layers": 6,
+    "n_up_layers": 2
+  },
+  "20M": {
+    "embedding_dim": 384,
+    "num_heads": 6,
+    "n_down_layers": 2,
+    "n_mid_layers": 6,
+    "n_up_layers": 2
+  },
+  "32M": {
+    "embedding_dim": 512,
+    "num_heads": 8,
+    "n_down_layers": 2,
+    "n_mid_layers": 6,
+    "n_up_layers": 2
+  },
+  "40M": {
+    "embedding_dim": 512,
+    "num_heads": 8,
+    "n_down_layers": 4,
+    "n_mid_layers": 6,
+    "n_up_layers": 4
+  },
+  "73M": {
+    "embedding_dim": 768,
+    "num_heads": 12,
+    "n_down_layers": 2,
+    "n_mid_layers": 6,
+    "n_up_layers": 2
+  },
+  "90M": {
+    "embedding_dim": 768,
+    "num_heads": 12,
+    "n_down_layers": 4,
+    "n_mid_layers": 6,
+    "n_up_layers": 4
+  },
+  "130M": {
+    "embedding_dim": 768,
+    "num_heads": 12,
+    "n_down_layers": 2,
+    "n_mid_layers": 12,
+    "n_up_layers": 2
+  },
+  "147M": {
+    "embedding_dim": 768,
+    "num_heads": 12,
+    "n_down_layers": 4,
+    "n_mid_layers": 12,
+    "n_up_layers": 4
+  },
+  "346M": {
+    "embedding_dim": 1024,
+    "num_heads": 16,
+    "n_down_layers": 2,
+    "n_mid_layers": 20,
+    "n_up_layers": 2
+  }
+}

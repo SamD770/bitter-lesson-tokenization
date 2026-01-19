@@ -1,0 +1,62 @@
+{
+  "18M": {
+    "learning_rate": 3.6e-3,
+    "effective_batch_size": 32,
+    "warmup_bytes": 6.2e7,
+    "training_bytes": 8.3e8
+  },
+  "20M": {
+    "learning_rate": 3e-3,
+    "effective_batch_size": 32,
+    "warmup_bytes": 6.2e7,
+    "training_bytes": 8.3e8
+  },
+  "32M": {
+    "learning_rate": 3e-3,
+    "effective_batch_size": 64,
+    "warmup_bytes": 1.1e8,
+    "training_bytes": 1.5e9
+  },
+  "40M": {
+    "learning_rate": 2.4e-3,
+    "effective_batch_size": 64,
+    "warmup_bytes": 1.1e8,
+    "training_bytes": 1.5e9
+  },
+  "73M": {
+    "learning_rate": 2.4e-3,
+    "effective_batch_size": 128,
+    "warmup_bytes": 2.5e8,
+    "training_bytes": 3.4e9
+  },
+  "90M": {
+    "learning_rate": 2e-3,
+    "effective_batch_size": 128,
+    "warmup_bytes": 2.5e8,
+    "training_bytes": 3.4e9
+  },
+  "130M": {
+    "learning_rate": 2e-3,
+    "effective_batch_size": 128,
+    "warmup_bytes": 4.5e8,
+    "training_bytes": 6e9
+  },
+  "147M": {
+    "learning_rate": 1.5e-3,
+    "effective_batch_size": 128,
+    "warmup_bytes": 4.5e8,
+    "training_bytes": 6e9
+  },
+  "346M": {
+    "learning_rate": 1.5e-3,
+    "effective_batch_size": 256,
+    "warmup_bytes": 1.2e9,
+    "training_bytes": 16e9
+  },
+  "XM": {
+    "learning_rate": 3.6e-3,
+    "effective_batch_size": 32,
+    "warmup_bytes": 6.2e7,
+    "training_bytes": 8.3e8
+  }
+}

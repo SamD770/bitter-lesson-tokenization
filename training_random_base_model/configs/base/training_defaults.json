@@ -1,0 +1,10 @@
+{
+  "num_epochs": 1,
+  "downsample_rate_target": 0.2,
+  "early_output_loss_weight": 0.0,
+  "max_seq_length": 4096,
+  "step_print_every": 100,
+  "validate_every": 100,
+  "warm_start_steps": null,
+  "learn_gating": false
+}
