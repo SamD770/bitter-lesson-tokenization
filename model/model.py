@@ -439,7 +439,7 @@ class AutoregressiveUnet(nn.Module):
                     attention_mask=byte_attention_mask,
                     position_ids=position_ids,
                     cache_position=byte_cache_position,
-                    past_key_value=past_key_value,
+                    past_key_values=past_key_value,
                     use_cache=use_cache
                 )[0]
 
@@ -491,7 +491,7 @@ class AutoregressiveUnet(nn.Module):
                     attention_mask=downsampled_attention_mask,
                     position_ids=position_ids_downsampled,
                     cache_position=downsampled_cache_position,
-                    past_key_value=past_key_value,
+                    past_key_values=past_key_value,
                     use_cache=use_cache
                 )[0]
 
@@ -513,7 +513,7 @@ class AutoregressiveUnet(nn.Module):
                     attention_mask=byte_attention_mask,
                     position_ids=position_ids,
                     cache_position=byte_cache_position,
-                    past_key_value=past_key_value,
+                    past_key_values=past_key_value,
                     use_cache=use_cache
                 )[0]
 

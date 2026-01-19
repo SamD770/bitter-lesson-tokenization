@@ -1,4 +1,12 @@
-from training_random_base_model.hparam_utils import get_model_kwargs, get_optimization_kwargs, model_sizes, training_loop_hparam_defaults
+from training_random_base_model.config_loader import (
+    load_config, 
+    config_to_wandb, 
+    get_available_sizes,
+    get_available_architectures,
+    get_run_types,
+    get_model_name,
+    save_model_config,
+)
 from data_processing import split_fineweb
 
 from model.utils import parameter_count_string
@@ -9,30 +17,16 @@ from model.model import (
     save_checkpoint,
     load_checkpoint,
 )
-from model.modules import (
-    ExactRandomGater,
-    LinearGater,
-    DistributeAddUpsampler, 
-)
-
-from model.nawrot_plugin import NawrotDownsampler, NawrotUpsampler, NawrotGater
-
-from model.hnet_plugin import  HNetDownsampler, HNetUpsampler, HNetGater
-
-from model.conditional_sequential import ScaledSequentialyDependentLinearGater, OptimizedSequentialyDependentLinearGater
 
 import os
-
 import argparse
 
 import torch
 from torch.utils.data import DataLoader
 
 from transformers import AutoTokenizer
-import datasets
 from accelerate import Accelerator
 from accelerate.utils import set_seed
-from accelerate import DistributedDataParallelKwargs
 
 from datetime import datetime
 
@@ -79,10 +73,6 @@ def effective_to_device_steps(optimization_kwargs, training_loop_kwargs, acceler
         "gradient_accumulation_steps": gradient_accumulation_steps
     }
 
-    # delta_training_loop_kwargs = {
-    #     "stop_condition": stop_condition,
-    # }
-
     return delta_optimization_kwargs, checkpoint_conditions
 
 
@@ -112,7 +102,6 @@ def get_optimizer_scheduler(optimization_kwargs, model):
 
 
 def get_dataloaders(batch_size, log_status, num_processes):
-
 
     # Download a portion of OpenWebText dataset
     # This will download a subset of the OpenWebText corpus
@@ -145,151 +134,66 @@ def get_dataloaders(batch_size, log_status, num_processes):
     return train_dataloader, val_dataloader
 
 
-def to_wandb_config(config):
-    # Convert class objects to string representations for wandb config serialization
-    config_for_wandb = config.copy()
-    config_for_wandb["GaterClass"] = config["GaterClass"].__name__
-    config_for_wandb["DownSamplerClass"] = config["DownSamplerClass"].__name__
-    # TODO: We can add a stop condition config
-    config_for_wandb["stop_condition"] = config["stop_condition"].__class__.__name__
-    config_for_wandb["bytes_limit"] = config["stop_condition"].bytes_limit
-
-    return config_for_wandb
-
-
-def add_nawrot_model_kwargs(model_kwargs):
-    model_kwargs["GaterClass"] = NawrotGater
-    model_kwargs["DownSamplerClass"] = NawrotDownsampler
-    model_kwargs["UpsamplerClass"] = NawrotUpsampler
-    return model_kwargs
-
-
-def add_nawrot_training_loop_kwargs(training_loop_kwargs):
-    training_loop_kwargs["learn_gating"] = True # For the consistency loss
-    training_loop_kwargs["relative_gating_loss_weight"] = 0.0 # So no policy gradient is used.
-    return training_loop_kwargs
-
-
-def add_hnet_model_kwargs(model_kwargs):
-    model_kwargs["GaterClass"] = HNetGater
-    model_kwargs["DownSamplerClass"] = HNetDownsampler
-    model_kwargs["UpsamplerClass"] = HNetUpsampler
-    model_kwargs["upsampler_kwargs"] = {"embedding_dim": model_kwargs["embedding_dim"]}
-    return model_kwargs
-
-
-def add_hnet_training_loop_kwargs(training_loop_kwargs):
-    training_loop_kwargs["learn_gating"] = True # For the consistency loss
-    training_loop_kwargs["relative_gating_loss_weight"] = 0.0 # So no policy gradient is used.
-    return training_loop_kwargs
-
-
-def add_linear_model_kwargs(model_kwargs):
-    model_kwargs["GaterClass"] = LinearGater
-    return model_kwargs
-
-def add_linear_training_loop_kwargs(training_loop_kwargs):
-    training_loop_kwargs["learn_gating"] = True
-    training_loop_kwargs["discount_rate"] = 0.99
-    training_loop_kwargs["early_exit_advantage_estimate"] = True
-    return training_loop_kwargs
-
-def add_sequential_dependent_linear_model_kwargs(model_kwargs):
-    model_kwargs["GaterClass"] = ScaledSequentialyDependentLinearGater
-    model_kwargs["gater_kwargs"] = {"scale_factor": 1/16., "filter_size": 8}
-    return model_kwargs
-
-def add_sequential_dependent_linear_training_loop_kwargs(training_loop_kwargs):
-    training_loop_kwargs["learn_gating"] = True
-    training_loop_kwargs["discount_rate"] = 0.99
-    training_loop_kwargs["early_exit_advantage_estimate"] = True
-    training_loop_kwargs["relative_gating_loss_weight"] = 0.01
-    training_loop_kwargs["consistency_loss_weight"] = 0.01
-    training_loop_kwargs["early_output_loss_weight"] = 0.1
-    training_loop_kwargs["step_print_every"] = 10
-    return training_loop_kwargs
-
-
-def add_sparse_model_kwargs(model_kwargs):
-    model_kwargs["downsample_rate"] = 2/3
-    model_kwargs["gater_kwargs"] = {"scale_factor": 1/8., "filter_size": 8}
-    return model_kwargs
-
-def add_sparse_training_loop_kwargs(training_loop_kwargs):
-    training_loop_kwargs["downsample_rate_target"] = 2/3
-    return training_loop_kwargs
-
-def add_add_upsampler_model_kwargs(model_kwargs):
-    model_kwargs["UpsamplerClass"] = DistributeAddUpsampler
-    return model_kwargs
-
-
-def add_variable_aspect_ratio_kwargs(model_kwargs, training_loop_kwargs, optimization_kwargs, aspect_ratio):
-    model_kwargs["n_mid_layers"] = aspect_ratio
-    model_kwargs["n_down_layers"] = 4
-    model_kwargs["n_up_layers"] = 4
-    model_kwargs["downsample_rate"] = 1/aspect_ratio
-    training_loop_kwargs["downsample_rate_target"] = 1/aspect_ratio
-    optimization_kwargs["training_bytes"] = 3e9
-
-
-
 def main():
+
+    # Get available choices from config files
+    sizes = get_available_sizes()
+    architectures = get_available_architectures()
+    run_types = get_run_types()
 
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Random base model training")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
-    parser.add_argument("--model_size", type=str, default="18M", choices=model_sizes, help="Model size to train")
+    parser.add_argument("--size", type=str, default="18M", choices=sizes, help="Model size to train")
+    parser.add_argument("--architecture", type=str, default="random", choices=architectures, help="Model architecture (gater/downsampler/upsampler)")
+    parser.add_argument("--run_type", type=str, default="default", choices=run_types, help="Training run type (training loop configuration)")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size used on each GPU")
     parser.add_argument("--resume_checkpoint", type=str, default=None, help="Checkpoint to resume training from")
     parser.add_argument("--aspect_ratio", type=int, default=None, help="Aspect ratio to train at")
-    parser.add_argument("--updownsampler", type=str, default="random", choices=["random","sequential", "nawrot", "hnet"], help="Upsampler/Downsampler/Gater to use")
     args = parser.parse_args()
 
+    # Validate aspect ratio
+    if args.aspect_ratio:
+        assert args.aspect_ratio in [1, 2, 3, 4, 5, 6, 7, 8], "Aspect ratio must be one of 1, 2, 3, 4, 5, 6, 7, 8"
 
     username = "sdauncey"
     scratch_dir = f"/scratch/{username}/tokenizer_training"
-    # scratch_dir = "/workspace"
     logging_dir = os.path.join(scratch_dir, "wandb_logs")
 
     byte_tokenizer = AutoTokenizer.from_pretrained("evabyte/EvaByte", trust_remote_code=True)
 
-    model_kwargs = get_model_kwargs(args.model_size)
-    model_kwargs["vocab_size"] = len(byte_tokenizer) # Keep for ExactRandomGater
+    # Load configuration from JSON files
+    model_kwargs, training_loop_kwargs, optimization_kwargs = load_config(
+        size=args.size,
+        architecture=args.architecture,
+        run_type=args.run_type,
+        aspect_ratio=args.aspect_ratio
+    )
+    
+    # Override vocab_size with tokenizer length
+    model_kwargs["vocab_size"] = len(byte_tokenizer)
 
-    # ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-    accelerator =  Accelerator(log_with="wandb") # , kwargs_handlers=[ddp_kwargs])
+    # Get model name for logging
+    model_name = get_model_name(args.size, args.architecture)
 
-    optimization_kwargs = get_optimization_kwargs(args.model_size)
+    # Initialize accelerator
+    accelerator = Accelerator(log_with="wandb")
 
-    training_loop_kwargs = training_loop_hparam_defaults
-
-    if args.aspect_ratio:
-        assert args.aspect_ratio in [1, 2, 3, 4, 5, 6, 7, 8], "Aspect ratio must be one of 1, 2, 3, 4, 5, 6, 7, 8"
-        add_variable_aspect_ratio_kwargs(model_kwargs, training_loop_kwargs, optimization_kwargs, args.aspect_ratio)
-
-
-    if args.updownsampler == "random":
-        add_add_upsampler_model_kwargs(model_kwargs)
-    if args.updownsampler == "sequential":
-        add_sequential_dependent_linear_model_kwargs(model_kwargs)
-        add_sequential_dependent_linear_training_loop_kwargs(training_loop_kwargs)
-        add_add_upsampler_model_kwargs(model_kwargs)
-    elif args.updownsampler == "nawrot":
-        add_nawrot_model_kwargs(model_kwargs)
-        add_nawrot_training_loop_kwargs(training_loop_kwargs)
-    elif args.updownsampler == "hnet":
-        add_hnet_model_kwargs(model_kwargs)
-        add_hnet_training_loop_kwargs(training_loop_kwargs)
-
-
+    # Compute device-specific optimization parameters
     delta_optimization_kwargs, checkpoint_conditions = \
         effective_to_device_steps(optimization_kwargs, training_loop_kwargs, accelerator, args.batch_size)
 
     optimization_kwargs.update(delta_optimization_kwargs)
-    # training_loop_kwargs.update(delta_training_loop_kwargs)
 
-    config = {**vars(args), **training_loop_kwargs, **optimization_kwargs, **model_kwargs, "stop_condition":checkpoint_conditions[-1]}
+    # Build combined config for logging
+    config = {
+        **vars(args), 
+        **training_loop_kwargs, 
+        **optimization_kwargs, 
+        **model_kwargs, 
+        "model_name": model_name,
+        "stop_condition": checkpoint_conditions[-1]
+    }
 
     if accelerator.is_main_process: 
         for k, v in config.items():
@@ -309,18 +213,23 @@ def main():
     else:
         aspect_ratio_string = "_"
     
-    run_id = f"{args.model_size}_{args.updownsampler}_{aspect_ratio_string}{seed_string}{time_string}"
+    run_id = f"{model_name}_{args.run_type}_{aspect_ratio_string}{seed_string}{time_string}"
 
     if accelerator.is_main_process:
         print(f"Run ID: {run_id}")
 
+    # Convert config for wandb
+    wandb_config = config_to_wandb(model_kwargs, training_loop_kwargs, optimization_kwargs, checkpoint_conditions[-1])
+    wandb_config.update(vars(args))
+    wandb_config["model_name"] = model_name
+
     # For some reason, you need to pass the config to the init_kwargs when using wandb with accelerate in offline mode. https://github.com/huggingface/accelerate/issues/3607
     accelerator.init_trackers(
         "training_random_base_model", 
-        config=to_wandb_config(config), 
+        config=wandb_config, 
         init_kwargs={
             "wandb": {
-                "config": to_wandb_config(config),
+                "config": wandb_config,
                 "entity": "samdauncey-eth-z-rich",
                 "id": run_id
         }},
@@ -339,7 +248,6 @@ def main():
     train_dataloader, val_dataloader = get_dataloaders(optimization_kwargs["batch_size"], accelerator.is_main_process, accelerator.num_processes)
 
     model = AutoregressiveUnet(**model_kwargs).to(device, dtype=torch.bfloat16)
-
 
     if accelerator.is_main_process:
         print(f"model has {parameter_count_string(model)} parameters")
@@ -377,6 +285,8 @@ def main():
         if accelerator.is_main_process:
             print(f"Saving intermediate checkpoint to {intermediate_checkpoint_dir}")
             save_checkpoint(intermediate_checkpoint_dir, accelerator, elapsed_vals)
+            # Save model config alongside checkpoint for easy model recreation
+            save_model_config(model_kwargs, os.path.join(intermediate_checkpoint_dir, "model_config.json"))
 
     accelerator.end_training()
 
@@ -387,6 +297,9 @@ def main():
         print(f"Saving checkpoint to {final_checkpoint_dir}")
 
     save_checkpoint(final_checkpoint_dir, accelerator, elapsed_vals)
+    # Save model config alongside final checkpoint
+    if accelerator.is_main_process:
+        save_model_config(model_kwargs, os.path.join(final_checkpoint_dir, "model_config.json"))
 
 if __name__ == "__main__":
     main()
