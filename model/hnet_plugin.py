@@ -3,7 +3,7 @@ from torch import nn
 from typing import Tuple
 import torch.nn.functional as F
 
-from .hnet_downsampler import RoutingModule, ChunkLayer, DeChunkLayer
+from .hnet_downsampler import RoutingModule, ChunkLayer, DeChunkLayer, ste_func
 from .modules import get_merge_dst
 
 
@@ -159,11 +159,6 @@ class HNetUpsampler(nn.Module):
             headdim=headdim,
         )
         
-        # Residual projection (following HNet's pattern)
-        # Initialize to zeros so initially the residual has no effect
-        self.residual_proj = nn.Linear(embedding_dim, embedding_dim)
-        nn.init.zeros_(self.residual_proj.weight)
-        nn.init.zeros_(self.residual_proj.bias)
     
     def forward(
         self, 
@@ -185,7 +180,7 @@ class HNetUpsampler(nn.Module):
             up_merge_dst: (B, S, 1) merge destination for each token
         """
         batch_size, seq_len, _ = x.shape
-        
+
         # Handle potential trailing dimension
         if down_gate_samples.dim() == 3:
             down_gate_samples = down_gate_samples.squeeze(-1)  # (B, S)
@@ -213,9 +208,12 @@ class HNetUpsampler(nn.Module):
             inference_params=None
         )
         
-        # Apply residual connection (following HNet's pattern)
-        residual = self.residual_proj(x)
-        y = y_dechunked + residual
+        # Recompute the selected_probs from the Routing module's output.
+        selected_idx = down_gate_samples.unsqueeze(-1).to(torch.long)
+        selected_probs = boundary_prob.gather(dim=-1, index=selected_idx)
+
+        # Apply residual connection and ste function (following HNet's pattern)
+        y = y_dechunked * ste_func(selected_probs) + x
         
         # Compute up_merge_dst for compatibility
         # For upsampling, shift gate_samples to align with the "distribute" pattern
