@@ -16,9 +16,10 @@ unset TMPDIR # to fix OSError: Device or resource busy https://discuss.pytorch.o
 accelerate launch \
     --main_process_port 0 \
     -m training_random_base_model.run \
-    --model_size $MODEL_SIZE \
+    --size $MODEL_SIZE \
     --batch_size $BATCH_SIZE \
-    --updownsampler $UPDOWN_SAMPLER \
+    --run_type $UPDOWN_SAMPLER \
+    --architecture $UPDOWN_SAMPLER \
     --seed $SEED \
 
 

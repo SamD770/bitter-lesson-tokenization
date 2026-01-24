@@ -3,8 +3,30 @@ from torch import nn
 from typing import Tuple
 import torch.nn.functional as F
 
-from .hnet_downsampler import RoutingModule, ChunkLayer, DeChunkLayer, ste_func
+from .hnet_downsampler import RoutingModule, ChunkLayer, DeChunkLayer, ste_func, load_balancing_loss, RoutingModuleOutput
 from .modules import get_merge_dst
+
+
+def hnet_consistency_loss(
+    down_gate_probs: torch.Tensor,
+    down_gate_samples: torch.Tensor,
+    downsample_rate_target: float,
+) -> torch.Tensor:
+    """
+    Compute the consistency loss for HNet. Just copy the load_balancing_loss formula.
+    """
+
+    N = 1 / downsample_rate_target
+
+    true_ratio = down_gate_samples.float().mean()
+    average_prob = down_gate_probs.float().mean()
+
+    return (
+        (1 - true_ratio) * (1 - average_prob) +
+        (true_ratio) * (average_prob) * (N-1)
+    ) * N / (N-1)
+
+
 
 
 class HNetGater(nn.Module):
@@ -19,11 +41,12 @@ class HNetGater(nn.Module):
         self, 
         embedding_dim: int,
         downsample_rate: float = 0.25,  # Ignored, kept for interface compatibility
+        random_init: bool = False,
     ):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.downsample_rate = downsample_rate  # Not used by RoutingModule
-        self.routing_module = RoutingModule(d_model=embedding_dim)
+        self.routing_module = RoutingModule(d_model=embedding_dim, random_init=random_init)
 
     def forward(self, x: torch.Tensor, downsample_rate=None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """

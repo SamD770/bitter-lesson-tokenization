@@ -12,6 +12,9 @@ from einops import repeat, rearrange
 from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 
 
+
+
+
 def get_seq_idx(cu_seqlens, device=None):
     seq_idx = torch.zeros(cu_seqlens[-1], dtype=torch.long, device=device)
     seq_idx[cu_seqlens[:-1]] = 1
@@ -39,6 +42,39 @@ class RoutingModuleOutput:
     boundary_prob: torch.Tensor
     boundary_mask: torch.Tensor
     selected_probs: torch.Tensor
+
+
+def load_balancing_loss(
+    router_output: RoutingModuleOutput,
+    N: float,
+) -> torch.Tensor:
+    """
+    Compute the load balancing loss.
+    
+    NOTE: This is the loss we used for all experiments. It computes the loss on each device/minibatch, and then averages the loss over all devices/minibatches.
+    It is possible that computing the loss on each example is better, or that computing the statistics over the entire (global) batch would have been better.
+
+    Args:
+        router_output: The output of the routing module.
+        N: The number of "experts", i.e. the downsampling factor. Can be a float (e.g. 2.5) or an integer (e.g. 3), but must be greater than 1.
+
+    Returns:
+        A single tensor, the load balancing loss.
+    """
+    boundary_prob = router_output.boundary_prob
+    tokenized_prob = boundary_prob[..., -1]
+    boundary_mask = router_output.boundary_mask
+
+    true_ratio = boundary_mask.float().mean()
+    average_prob = tokenized_prob.float().mean()
+
+    return (
+        (1 - true_ratio) * (1 - average_prob) +
+        (true_ratio) * (average_prob) * (N-1)
+    ) * N / (N-1)
+
+
+
 
 
 @dataclass
@@ -69,17 +105,18 @@ class DeChunkState:
 
 class RoutingModule(nn.Module):
 
-    def __init__(self, d_model, device=None, dtype=None):
+    def __init__(self, d_model, device=None, dtype=None, random_init=False):
         self.d_model = d_model
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.q_proj_layer = nn.Linear(d_model, d_model, bias=False, **factory_kwargs)
         self.k_proj_layer = nn.Linear(d_model, d_model, bias=False, **factory_kwargs)
-        with torch.no_grad():
-            self.q_proj_layer.weight.copy_(torch.eye(d_model))
-            self.k_proj_layer.weight.copy_(torch.eye(d_model))
-        self.q_proj_layer.weight._no_reinit = True
-        self.k_proj_layer.weight._no_reinit = True
+        if not random_init: # ADDED BY SAM: to allow for random initialization of the routing module
+            with torch.no_grad():
+                self.q_proj_layer.weight.copy_(torch.eye(d_model))
+                self.k_proj_layer.weight.copy_(torch.eye(d_model))
+            self.q_proj_layer.weight._no_reinit = True
+            self.k_proj_layer.weight._no_reinit = True
 
     def allocate_inference_cache(self, batch_size, max_seqlen, device, dtype=None):
         return RoutingModuleState(

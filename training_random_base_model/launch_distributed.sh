@@ -16,14 +16,15 @@ unset TMPDIR # to fix OSError: Device or resource busy https://discuss.pytorch.o
 
 source wandb_offline_integration/setup.sh
 OUTPUT_FILE=training_random_base_model/${MODEL_SIZE}_${SEED}_output.log
+bash run_apptainer.sh
 
-
-accelerate launch \
+CUDA_LAUNCH_BLOCKING=1 accelerate launch \
     --main_process_port 0 \
     -m training_random_base_model.run \
-    --model_size $MODEL_SIZE \
+    --size $MODEL_SIZE \
     --batch_size $BATCH_SIZE \
-    --updownsampler $UPDOWN_SAMPLER \
+    --run_type $UPDOWN_SAMPLER \
+    --architecture $UPDOWN_SAMPLER \
     --seed $SEED \
     2>&1 | tee ${OUTPUT_FILE}
 

@@ -3,7 +3,7 @@ from model.hnet_plugin import HNetDownsampler, HNetUpsampler, HNetGater
 import torch
 from model.testing_flash_attn_causality import test_causality
 from model.model import AutoregressiveUnet
-
+from tqdm import trange
 
 def test_dechunk_layer():
     """
@@ -56,12 +56,29 @@ def test_forward_pass():
 
     # print(f"{my_model.down_layer_gate.boundary_predictor=}")
 
-    my_x = torch.randn(32, 2048, 128).to("cuda", dtype=dtype)
-    my_x.requires_grad_(True)
+    for _ in trange(10):
 
-    my_out, _, _ = my_model.forward_backbone(my_x)
+        my_x = torch.randn(32, 2048, 128).to("cuda", dtype=dtype)
+        my_x.requires_grad_(True)
 
-    test_causality(my_x, my_out, window_size=None)
+        my_out, _, _ = my_model.forward_backbone(my_x)
+
+        test_causality(my_x, my_out, window_size=None)
+
+    # Print the gradient of the layers in the down_layer_gate module
+    for name, param in my_model.down_layers[0].named_parameters():
+        if param.grad is not None:
+            print(f"{name}: grad norm = {param.grad.norm().item()}")
+        else:
+            print(f"{name}: grad is None")
+
+
+    # Print the gradient of the layers in the down_layer_gate module
+    for name, param in my_model.down_layer_gate.named_parameters():
+        if param.grad is not None:
+            print(f"{name}: grad norm = {param.grad.norm().item()}")
+        else:
+            print(f"{name}: grad is None")
 
 
 if __name__ == "__main__":

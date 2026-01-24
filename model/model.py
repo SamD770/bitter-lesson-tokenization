@@ -37,6 +37,7 @@ from .modules import (
 from .conditional_sequential import SequentiallyDependentRandomGater
 from transformers.models.gemma2.modeling_gemma2 import Gemma2Model, Gemma2Config, Gemma2RotaryEmbedding #, HybridCache, StaticCache, Cache
 from .downsample_rate_scheduler import DefaultDownsampleRateScheduler
+from .hnet_plugin import hnet_consistency_loss
 
 from typing import Optional, Dict, Union, List
 
@@ -695,6 +696,7 @@ def off_policy_flexible_training_step(
     
     on_policy_probs = out_model["down_gate_probs"]
     on_policy_logits = out_model["down_gate_logits"]
+    down_gate_samples = out_model["down_gate_samples"]
 
     if not use_off_policy:
         off_policy_gate_probs = on_policy_probs
@@ -726,7 +728,8 @@ def off_policy_flexible_training_step(
 
     ar_loss = (1 - early_output_loss_weight) * late_ar_loss + early_output_loss_weight * early_ar_loss
     
-    true_downsample_rate = on_policy_probs.mean()
+    mean_downsample_prob = on_policy_probs.mean()
+    true_downsample_rate = down_gate_samples.to(dtype=torch.float32).mean()
 
     if learn_gating:
         selected_action_cross_entropy = per_token_losses["selected_action_cross_entropy"]
@@ -744,9 +747,10 @@ def off_policy_flexible_training_step(
         gating_loss = relative_gating_loss_weight * gating_loss
 
         # Hacky additional consistency loss : decrease the mean logits if the true downsample rate exceeds the target.
-        factor = (true_downsample_rate - downsample_rate_target).detach()
+        factor = (mean_downsample_prob - downsample_rate_target).detach()
         mean_logits = on_policy_logits.mean()
-        down_gate_rate_loss = consistency_loss_weight * mean_logits * factor
+        down_gate_rate_loss = hnet_consistency_loss(on_policy_probs, down_gate_samples, downsample_rate_target)
+        # down_gate_rate_loss = consistency_loss_weight * mean_logits * factor
 
         total_loss = ar_loss + gating_loss + down_gate_rate_loss
     else:

@@ -10,6 +10,7 @@ from training_random_base_model.config_loader import (
 from data_processing import split_fineweb
 
 from model.utils import parameter_count_string
+from plots.auto_make_heatmap import render_and_save_heatmaps
 from model.model import (
     AutoregressiveUnet, 
     training_loop,
@@ -131,7 +132,7 @@ def get_dataloaders(batch_size, log_status, num_processes):
         pin_memory=True
     )
 
-    return train_dataloader, val_dataloader
+    return train_dataloader, val_dataloader, test_set
 
 
 def main():
@@ -171,7 +172,7 @@ def main():
     )
     
     # Override vocab_size with tokenizer length
-    model_kwargs["vocab_size"] = len(byte_tokenizer)
+    # model_kwargs["vocab_size"] = len(byte_tokenizer)
 
     # Get model name for logging
     model_name = get_model_name(args.size, args.architecture)
@@ -245,7 +246,7 @@ def main():
     if accelerator.is_main_process:
         print(f"Using random seed: {args.seed}")
 
-    train_dataloader, val_dataloader = get_dataloaders(optimization_kwargs["batch_size"], accelerator.is_main_process, accelerator.num_processes)
+    train_dataloader, val_dataloader, test_set = get_dataloaders(optimization_kwargs["batch_size"], accelerator.is_main_process, accelerator.num_processes)
 
     model = AutoregressiveUnet(**model_kwargs).to(device, dtype=torch.bfloat16)
 
@@ -300,6 +301,10 @@ def main():
     # Save model config alongside final checkpoint
     if accelerator.is_main_process:
         save_model_config(model_kwargs, os.path.join(final_checkpoint_dir, "model_config.json"))
+
+    if accelerator.is_main_process:
+        render_directory = os.path.join(net_scratch_dir, "training_random_base_model", "renders", run_id)
+        render_and_save_heatmaps(model, test_set, byte_tokenizer, render_directory)
 
 if __name__ == "__main__":
     main()
