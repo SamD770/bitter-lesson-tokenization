@@ -14,7 +14,6 @@ training_random_base_model/renders/*
 *.out
 *.err
 *.log
-*.json
 
 *.wandb
 *.wandb.synced
@@ -26,6 +25,7 @@ training_random_base_model/renders/*
 *.safetensors
 *.pkl
 *.json
+!training_random_base_model/configs/**/*.json
 *.yaml
 *.txt
 *.scratch_clean_remove_empty
