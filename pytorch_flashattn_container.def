@@ -16,13 +16,7 @@ From: pytorch/pytorch:2.7.0-cuda12.6-cudnn9-devel
     pip3 install --no-cache-dir flash-attn --no-build-isolation
     pip3 install transformers
     pip3 install datasets
-    
-    # Set HOME and create the directory, then configure git
-    export HOME=/root
-    mkdir -p $HOME
-    git config --global --add safe.directory '*'
-    
-    pip3 install --no-cache-dir git+https://github.com/state-spaces/mamba.git@a6a1dae6efbf804c9944a0c2282b437deb4886d8
+    pip3 install --no-cache-dir mamba-ssm --no-build-isolation
 
 %environment
     export LC_ALL=C
