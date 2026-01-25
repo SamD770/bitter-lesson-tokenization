@@ -51,7 +51,10 @@ def test_forward_pass():
         DownSamplerClass=HNetDownsampler,
         UpsamplerClass=HNetUpsampler,
         GaterClass=HNetGater,
-        upsampler_kwargs={"embedding_dim": 128},
+        upsampler_kwargs={
+            "embedding_dim": 128, 
+            "detach_probs": False # setting to True should stop gater params from getting gradients 
+        },
     ).to(device="cuda", dtype=dtype)
 
     # print(f"{my_model.down_layer_gate.boundary_predictor=}")

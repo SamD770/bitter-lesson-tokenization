@@ -172,6 +172,7 @@ class HNetUpsampler(nn.Module):
         dtype: torch.dtype = torch.bfloat16,
         block_size: int = 256,
         headdim: int = 32,
+        detach_probs: bool = False,
     ):
         super().__init__()
         self.embedding_dim = embedding_dim
@@ -181,6 +182,7 @@ class HNetUpsampler(nn.Module):
             block_size=block_size,
             headdim=headdim,
         )
+        self.detach_probs = detach_probs
         
     
     def forward(
@@ -203,6 +205,10 @@ class HNetUpsampler(nn.Module):
             up_merge_dst: (B, S, 1) merge destination for each token
         """
         batch_size, seq_len, _ = x.shape
+
+        # Interesting ablation: What if we don't allow gradients to flow through the down_gate_probs but keep the initialization?
+        if self.detach_probs:
+            down_gate_probs = down_gate_probs.detach()
 
         # Handle potential trailing dimension
         if down_gate_samples.dim() == 3:

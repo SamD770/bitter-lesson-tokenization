@@ -114,8 +114,10 @@ def _build_model_config(size: str, architecture: str) -> dict:
     
     # Handle upsampler_kwargs_from_embedding_dim
     if model_config.pop("upsampler_kwargs_from_embedding_dim", False):
+        existing_kwargs = model_config.get("upsampler_kwargs", {})
         model_config["upsampler_kwargs"] = {
-            "embedding_dim": model_config["embedding_dim"]
+            "embedding_dim": model_config["embedding_dim"],
+            **existing_kwargs
         }
     
     return model_config
