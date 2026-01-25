@@ -10,6 +10,7 @@ class SequentialyDependentGater(nn.Module):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.filter_size = filter_size
+        raise NotImplementedError("Use ScaledSequentialyDependentLinearGater instead.")
 
     def forward(self, x: torch.Tensor, downsample_rate: float) -> torch.Tensor:
         """
@@ -64,6 +65,7 @@ class SequentiallyDependentRandomGater(SequentialyDependentGater):
         base_logit_init = torch.log(torch.tensor(downsample_rate / (1 - downsample_rate))) # Use the inverse sigmoid to get the logit of the downsample rate.
         self.base_value = nn.Parameter(torch.ones((1,)) * base_logit_init)
         self.filter = nn.ParameterList([nn.Parameter(torch.zeros((1,))) for _ in range(filter_size)])
+        raise NotImplementedError("Use ScaledSequentialyDependentLinearGater instead.")
 
     def precompute_filter_weights(self, x: torch.Tensor) -> torch.Tensor:
         pass
@@ -82,6 +84,7 @@ class SequentiallyDependentLinearGater(SequentialyDependentGater):
     def __init__(self, embedding_dim: int, downsample_rate: float, filter_size: int = 8):
         super().__init__(embedding_dim=embedding_dim, downsample_rate=downsample_rate, filter_size=filter_size)
         self.filter_layer = nn.Linear(embedding_dim, filter_size + 1) # +1 for the base value
+        raise NotImplementedError("Use ScaledSequentialyDependentLinearGater instead.")
 
     def precompute_filter_weights(self, x: torch.Tensor) -> torch.Tensor:
         """Returns the filter weights for each token in the sequence. Of shape (batch_size, seq_len, filter_size + 1)"""
@@ -106,6 +109,7 @@ class OptimizedSequentialyDependentLinearGater(nn.Module):
         self.downsample_rate = downsample_rate
         self.filter_size = filter_size
         self.filter_layer = nn.Linear(embedding_dim, filter_size)
+        raise NotImplementedError("Use ScaledSequentialyDependentLinearGater instead.")
 
     def forward(self, x: torch.Tensor, downsample_rate: float) -> torch.Tensor:
         V = self.filter_layer(x)
@@ -151,7 +155,7 @@ class ScaledSequentialyDependentLinearGater(nn.Module):
 
 if __name__ == "__main__":
     my_x = torch.randn(32, 1024, 256, dtype=torch.float32, device="cuda")
-    gater = SequentiallyDependentLinearGater(embedding_dim=256, downsample_rate=0.25, filter_size=4).to("cuda", dtype=torch.float32)
+    gater = ScaledSequentiallyDependentLinearGater(embedding_dim=256, downsample_rate=0.25, filter_size=4).to("cuda", dtype=torch.float32)
 
     print(gater)
 
