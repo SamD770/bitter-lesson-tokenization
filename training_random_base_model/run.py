@@ -303,9 +303,9 @@ def main():
             # Save model config alongside checkpoint for easy model recreation
             save_model_config(model_kwargs, os.path.join(intermediate_checkpoint_dir, "model_config.json"))
 
-            intermediate_render_dir = os.path.join(intermediate_render_base, f"checkpoint_{elapsed_vals['effective_batches_elapsed']}")
-            print(f"Saving intermediate renders to {intermediate_render_dir}")
-            render_and_save_heatmaps(model, test_set, byte_tokenizer, intermediate_render_dir)
+            # intermediate_render_dir = os.path.join(intermediate_render_base, f"checkpoint_{elapsed_vals['effective_batches_elapsed']}")
+            # print(f"Saving intermediate renders to {intermediate_render_dir}")
+            # render_and_save_heatmaps(model, test_set, byte_tokenizer, intermediate_render_dir)
         
         accelerator.wait_for_everyone()
 
@@ -325,6 +325,8 @@ def main():
     if accelerator.is_main_process:
         render_directory = os.path.join(net_scratch_dir, "training_random_base_model", "renders", run_id)
         render_and_save_heatmaps(model, test_set, byte_tokenizer, render_directory)
+
+    accelerator.wait_for_everyone()
 
 if __name__ == "__main__":
     main()
