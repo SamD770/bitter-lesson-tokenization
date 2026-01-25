@@ -8,8 +8,6 @@ MODEL_SIZE=$1
 BATCH_SIZE=$2
 UPDOWN_SAMPLER=${3:-"random"}
 
-SEED=${4:-42}
-
 echo "Starting training random base model with seed $SEED at $(date)"
 
 unset TMPDIR # to fix OSError: Device or resource busy https://discuss.pytorch.org/t/num-workers-in-dataloader-always-gives-this-error/64718/8
@@ -25,6 +23,7 @@ CUDA_LAUNCH_BLOCKING=1 accelerate launch \
     --batch_size $BATCH_SIZE \
     --run_type $UPDOWN_SAMPLER \
     --architecture $UPDOWN_SAMPLER \
+    --dataset $DATASET \
     --seed $SEED \
     2>&1 | tee ${OUTPUT_FILE}
 

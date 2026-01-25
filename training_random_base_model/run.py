@@ -7,7 +7,9 @@ from training_random_base_model.config_loader import (
     get_model_name,
     save_model_config,
 )
-from data_processing import split_fineweb
+from data_processing import split_fineweb, split_codeparrot
+
+AVAILABLE_DATASETS = ["fineweb", "codeparrot"]
 
 from model.utils import parameter_count_string
 from plots.auto_make_heatmap import render_and_save_heatmaps
@@ -102,17 +104,20 @@ def get_optimizer_scheduler(optimization_kwargs, model):
     return optimizer, scheduler
 
 
-def get_dataloaders(batch_size, log_status, num_processes):
-
-    # Download a portion of OpenWebText dataset
-    # This will download a subset of the OpenWebText corpus
-    if log_status:
-        print("Getting Fineweb splits...")
-
-    train_set, val_set, test_set = split_fineweb.get_splits()
+def get_dataloaders(batch_size, log_status, num_processes, dataset="fineweb"):
 
     if log_status:
-        print(f"Got: {len(train_set)} examples from Fineweb")
+        print(f"Getting {dataset} splits...")
+
+    if dataset == "fineweb":
+        train_set, val_set, test_set = split_fineweb.get_splits()
+    elif dataset == "codeparrot":
+        train_set, val_set, test_set = split_codeparrot.get_splits()
+    else:
+        raise ValueError(f"Unknown dataset: {dataset}. Available: {AVAILABLE_DATASETS}")
+
+    if log_status:
+        print(f"Got: {len(train_set)} examples from {dataset}")
 
     train_dataloader = DataLoader(
         train_set,
@@ -151,6 +156,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size used on each GPU")
     parser.add_argument("--resume_checkpoint", type=str, default=None, help="Checkpoint to resume training from")
     parser.add_argument("--aspect_ratio", type=int, default=None, help="Aspect ratio to train at")
+    parser.add_argument("--dataset", type=str, default="fineweb", choices=AVAILABLE_DATASETS, help="Dataset to train on (fineweb or codeparrot)")
     args = parser.parse_args()
 
     # Validate aspect ratio
@@ -193,6 +199,7 @@ def main():
         **optimization_kwargs, 
         **model_kwargs, 
         "model_name": model_name,
+        "dataset": args.dataset,
         "stop_condition": checkpoint_conditions[-1]
     }
 
@@ -213,8 +220,13 @@ def main():
         aspect_ratio_string = f"ar{args.aspect_ratio}_"
     else:
         aspect_ratio_string = "_"
+
+    if args.dataset != "fineweb":
+        dataset_string = f"{args.dataset}_"
+    else:
+        dataset_string = ""
     
-    run_id = f"{model_name}_{args.run_type}_{aspect_ratio_string}{seed_string}{time_string}"
+    run_id = f"{model_name}_{args.run_type}_{dataset_string}{aspect_ratio_string}{seed_string}{time_string}"
 
     if accelerator.is_main_process:
         print(f"Run ID: {run_id}")
@@ -223,6 +235,7 @@ def main():
     wandb_config = config_to_wandb(model_kwargs, training_loop_kwargs, optimization_kwargs, checkpoint_conditions[-1])
     wandb_config.update(vars(args))
     wandb_config["model_name"] = model_name
+    wandb_config["dataset"] = args.dataset
 
     # For some reason, you need to pass the config to the init_kwargs when using wandb with accelerate in offline mode. https://github.com/huggingface/accelerate/issues/3607
     accelerator.init_trackers(
@@ -246,7 +259,7 @@ def main():
     if accelerator.is_main_process:
         print(f"Using random seed: {args.seed}")
 
-    train_dataloader, val_dataloader, test_set = get_dataloaders(optimization_kwargs["batch_size"], accelerator.is_main_process, accelerator.num_processes)
+    train_dataloader, val_dataloader, test_set = get_dataloaders(optimization_kwargs["batch_size"], accelerator.is_main_process, accelerator.num_processes, dataset=args.dataset)
 
     model = AutoregressiveUnet(**model_kwargs).to(device, dtype=torch.bfloat16)
 
@@ -267,6 +280,7 @@ def main():
     elapsed_vals = {}
 
     intermediate_checkpoint_dir = os.path.join(scratch_dir, "training_random_base_model", "checkpoints", run_id)
+    
 
     for checkpoint_condition in checkpoint_conditions:
 

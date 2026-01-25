@@ -6,8 +6,9 @@
 MODEL_SIZE=$1
 BATCH_SIZE=$2
 UPDOWN_SAMPLER=${3:-"random"}
+DATASET=${4:-"fineweb"}
+SEED=${5:-42}
 
-SEED=${4:-42}
 
 echo "Starting training random base model with seed $SEED at $(date)"
 
@@ -20,6 +21,7 @@ accelerate launch \
     --batch_size $BATCH_SIZE \
     --run_type $UPDOWN_SAMPLER \
     --architecture $UPDOWN_SAMPLER \
+    --dataset $DATASET \
     --seed $SEED \
 
 
