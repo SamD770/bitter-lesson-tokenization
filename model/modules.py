@@ -265,10 +265,12 @@ def get_boundary_indices(gate_samples: torch.Tensor) -> Tuple[torch.Tensor, torc
     # then:        src = 0 -1  2  3 -1  5  6 -1 -1
     # and so reducing with max and index:
     #        merge_dst = 0  1  1  2  3  3  4  5  5
-    # gives: boundary_indices = 0 2 3 5 6 -1
+    # gives: boundary_indices = 0 2 3 5 6 -1    
     boundary_indices = torch.ones(batch_size, n_dst_max, dtype=torch.long).to(gate_samples.device) * -1
     src = torch.arange(seq_len, device=gate_samples.device).unsqueeze(0).expand(batch_size, -1)
-    src = src * gate_samples - 1 + gate_samples
+    # For long sequences, running this with float gate_samples will lead to rounding errors.
+    gate_samples_int = gate_samples.to(dtype=torch.long)
+    src = (src * gate_samples_int - 1 + gate_samples_int) 
     boundary_indices = torch.scatter_reduce(boundary_indices, dim=1, index=merge_dst, src=src, reduce="max", include_self=False)
     return boundary_indices, merge_dst
 
@@ -326,7 +328,7 @@ class SelectTokenDownsampler(nn.Module):
         x_downsampled = select(x, boundary_indices)
         position_ids_downsampled = select(position_ids, boundary_indices)
 
-        return x_downsampled, position_ids_downsampled, merge_dst
+        return x_downsampled, position_ids_downsampled, merge_dst.unsqueeze(-1)
 
 
 class AverageTokenDownsampler(nn.Module):
