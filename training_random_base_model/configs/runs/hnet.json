@@ -1,5 +1,6 @@
 {
   "learn_gating": true,
   "relative_gating_loss_weight": 0.0,
-  "consistency_loss_weight": 0.03
+  "consistency_loss_weight": 0.03,
+  "rate_consistency_loss": "hnet"
 }
