@@ -750,10 +750,8 @@ def off_policy_flexible_training_step(
         # Hacky additional consistency loss : decrease the mean logits if the true downsample rate exceeds the target.
 
         if rate_consistency_loss == "hnet":
-            print(f"using hnet consistency loss with weight {consistency_loss_weight}")
             down_gate_rate_loss = consistency_loss_weight * hnet_consistency_loss(on_policy_probs, down_gate_samples, downsample_rate_target)
         else:
-            print(f"using our consistency loss with weight {consistency_loss_weight}")
             factor = (mean_downsample_prob - downsample_rate_target).detach()
             mean_logits = on_policy_logits.mean()
             down_gate_rate_loss = consistency_loss_weight * mean_logits * factor
