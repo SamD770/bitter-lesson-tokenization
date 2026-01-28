@@ -111,8 +111,9 @@ def gate_probs_html(txt, gate_probs):
         # Use html.escape to properly handle all special characters including accented ones
         # import html
         char = html.escape(char)
-        char = char.replace("\n", "\\n")
+        char = char.replace("\n", "\\n<br>")
         char = char.replace("\t", "\\t")
+        char = char.replace(" ", "&nbsp;")
         # Convert probability to color (blue->red)
         r = min(1.0, prob)  # Red increases with probability
         b = max(0.0, 1.0 - prob)  # Blue decreases with probability

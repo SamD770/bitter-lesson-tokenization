@@ -5,16 +5,31 @@ from model.model import text_to_tensor
 import os
 from training_random_base_model.model_from_checkpoint import load_model
 import torch
-from data_processing import split_fineweb
+from data_processing import split_fineweb, split_codeparrot
 from transformers import AutoTokenizer
 
 
-def auto_make_heatmap(checkpoint_directory, render_directory):
+def auto_make_heatmap(checkpoint_directory, render_directory=None, dataset="fineweb"):
+
+    if render_directory is None:
+        # Extract the checkpoint name from the full path
+        checkpoint_name = os.path.basename(checkpoint_directory)
+        # Replace 'checkpoints' with 'renders' in the parent directory
+        parent_dir = os.path.dirname(checkpoint_directory)
+        render_parent = parent_dir.replace("checkpoints", "renders")
+        render_directory = os.path.join(render_parent, checkpoint_name)
+
     model = load_model(checkpoint_directory)
     model.eval()
     byte_tokenizer = AutoTokenizer.from_pretrained("evabyte/EvaByte", trust_remote_code=True)
 
-    _, _, test_set = split_fineweb.get_splits()
+    if dataset == "fineweb":
+        _, _, test_set = split_fineweb.get_splits()
+    elif dataset == "codeparrot":
+        _, _, test_set = split_codeparrot.get_splits()
+    else:
+        raise ValueError(f"Unknown dataset: {dataset}.")
+
     model = model.to("cuda", dtype=torch.bfloat16)
 
     render_and_save_heatmaps(model, test_set, byte_tokenizer, render_directory)
