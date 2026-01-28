@@ -135,14 +135,11 @@ class ScaledSequentialyDependentLinearGater(nn.Module):
         downsample_rate = min(downsample_rate, 0.999) # In case the downsample rate is 1.
         bias = math.log(downsample_rate / (1 - downsample_rate))
         x_init_dtype = x.dtype
-        # x = x.to(dtype=torch.float32)
 
-        # if self.filter_layer.weight.dtype != torch.float32:
-        #     self.to(dtype=torch.float32)
-        
         V = self.filter_layer(x)
-        scan_logits, scan_probs, a = torch_scan_simple_scaled(V, scale_factor=self.scale_factor, bias=bias)
-        logits, probs = compute_probs_scaled(a, V, scale_factor=self.scale_factor, bias=bias)
+        # During training, we use the soft-cap, during evaluation, we don't.
+        scan_logits, scan_probs, a = torch_scan_simple_scaled(V, scale_factor=self.scale_factor, bias=bias, use_soft_cap=self.training)
+        logits, probs = compute_probs_scaled(a, V, scale_factor=self.scale_factor, bias=bias, use_soft_cap=self.training)
         
         logits = logits.to(dtype=x_init_dtype)
         probs = probs.to(dtype=x_init_dtype)

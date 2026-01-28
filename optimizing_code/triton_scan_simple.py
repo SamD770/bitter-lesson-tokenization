@@ -124,7 +124,7 @@ def logit_soft_cap(logits, soft_cap=6.0):
 
 
 @torch.no_grad()
-def torch_scan_simple(V):
+def torch_scan_simple(V, use_soft_cap=True):
     batch_size, seq_len, window_size = V.shape
     V_init_device = V.device
     V = V.to("cpu") # For now, run this on CPU (faster than naive torch on GPU)
@@ -142,7 +142,10 @@ def torch_scan_simple(V):
         a_window = a[:, s:s+window_size]
         V_window = V[:, s, :]
         logit = torch.sum(a_window * V_window, dim=1)
-        logit = logit_soft_cap(logit)
+
+        if use_soft_cap:
+            logit = logit_soft_cap(logit)
+        
         prob = F.sigmoid(logit)
         probs[:, s] = prob
         logits[:, s] = logit
@@ -174,7 +177,7 @@ def compute_probs(a, V):
 
 
 @torch.no_grad()
-def torch_scan_simple_scaled(V, scale_factor=1.0, bias=0.0):
+def torch_scan_simple_scaled(V, scale_factor=1.0, bias=0.0, use_soft_cap=True):
     batch_size, seq_len, window_size = V.shape
     V_init_device = V.device
     V = V.to("cpu") # For now, run this on CPU (faster than naive torch on GPU)
@@ -193,7 +196,8 @@ def torch_scan_simple_scaled(V, scale_factor=1.0, bias=0.0):
         V_window = V[:, s, :]
         logit = torch.sum(a_window * V_window, dim=1)
         logit = logit * scale_factor + bias
-        logit = logit_soft_cap(logit)
+        if use_soft_cap:
+            logit = logit_soft_cap(logit)
         prob = F.sigmoid(logit)
         probs[:, s] = prob
         logits[:, s] = logit
@@ -206,7 +210,7 @@ def torch_scan_simple_scaled(V, scale_factor=1.0, bias=0.0):
 
 
 
-def compute_probs_scaled(a, V, scale_factor=1.0, bias=0.0):
+def compute_probs_scaled(a, V, scale_factor=1.0, bias=0.0, use_soft_cap=True):
     batch_size, seq_len, window_size = V.shape
     a_extended = torch.cat([torch.zeros(batch_size, window_size-1, device=a.device, dtype=a.dtype), a], dim=1)
 
@@ -220,7 +224,8 @@ def compute_probs_scaled(a, V, scale_factor=1.0, bias=0.0):
     a_window[:, :, -1] = 1. 
     logits = torch.sum(a_window * V, dim=2)
     logits = logits * scale_factor + bias
-    logits = logit_soft_cap(logits)
+    if use_soft_cap:
+        logits = logit_soft_cap(logits)
     probs = F.sigmoid(logits)
     return logits, probs
 

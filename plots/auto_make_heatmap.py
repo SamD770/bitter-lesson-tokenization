@@ -11,6 +11,7 @@ from transformers import AutoTokenizer
 
 def auto_make_heatmap(checkpoint_directory, render_directory):
     model = load_model(checkpoint_directory)
+    model.eval()
     byte_tokenizer = AutoTokenizer.from_pretrained("evabyte/EvaByte", trust_remote_code=True)
 
     _, _, test_set = split_fineweb.get_splits()
@@ -23,7 +24,9 @@ def render_and_save_heatmaps(model, test_set, byte_tokenizer, render_directory):
     for data_index in [1, 3, 5, 7]:
         tokens, _ = text_to_tensor(test_set[data_index], byte_tokenizer, 4096, "cuda")
         token_list = get_character_list(byte_tokenizer, tokens[0])
-        out = model(tokens)
+
+        with torch.no_grad():
+            out = model(tokens)
 
         if not os.path.exists(render_directory):
             os.makedirs(render_directory)
