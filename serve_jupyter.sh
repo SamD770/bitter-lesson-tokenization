@@ -1,1 +1,0 @@
-jupyter notebook --no-browser --port 5998 --ip $(hostname -f)

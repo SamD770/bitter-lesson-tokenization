@@ -1,1 +1,0 @@
-squeue -w tikgpu08 -o "%.18i %.9P %.20j %.8u %.8T %.10M %.6D %C %b %B"

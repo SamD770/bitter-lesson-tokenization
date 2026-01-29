@@ -1,1 +1,0 @@
-rsync -av --progress /scratch_net/tikgpu07/sdauncey/tokenizer_training/openwebtext_25p_cache/ /scratch/sdauncey/tokenizer_training/openwebtext_25p_cache/
