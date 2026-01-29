@@ -36,15 +36,15 @@ def load_runs_from_wandb(run_names):
         configs.append(config)
 
         df['run_name'] = run_name
-        df['model_size'] = config['model_size']
-        df['GaterClass'] = config['GaterClass']
+        # df['model_size'] = config['model_size']
+        # df['GaterClass'] = config['GaterClass']
 
-        # For backward compatibility: we added these keys to the config later.
-        if 'UpsamplerClass' in config:
-            df['UpsamplerClass'] = config['UpsamplerClass']
+        # # For backward compatibility: we added these keys to the config later.
+        # if 'UpsamplerClass' in config:
+        #     df['UpsamplerClass'] = config['UpsamplerClass']
 
-        if "seed" in config:
-            df['seed'] = config['seed']
+        # if "seed" in config:
+        #     df['seed'] = config['seed']
 
         dfs.append(df)
 
@@ -80,7 +80,7 @@ def get_character_list(tokenizer, token_ids):
 
 
 # Helper function: plot where the model puts high probability gates.
-def gate_probs_html(txt, gate_probs):
+def gate_probs_html(txt, gate_probs, render_code=True):
     
     # Ensure gate_probs and input_text have the same length
     gate_probs = gate_probs[:len(txt)]
@@ -111,9 +111,13 @@ def gate_probs_html(txt, gate_probs):
         # Use html.escape to properly handle all special characters including accented ones
         # import html
         char = html.escape(char)
-        char = char.replace("\n", "\\n<br>")
+        if break_newline:
+            char = char.replace("\n", "\\n<br>")
+            char = char.replace(" ", "&nbsp;")
+        else:
+            char = char.replace("\n", "\\n")
         char = char.replace("\t", "\\t")
-        char = char.replace(" ", "&nbsp;")
+        # 
         # Convert probability to color (blue->red)
         r = min(1.0, prob)  # Red increases with probability
         b = max(0.0, 1.0 - prob)  # Blue decreases with probability
@@ -126,6 +130,6 @@ def gate_probs_html(txt, gate_probs):
     <meta charset="utf-8">
     <div>
         {colorbar_html}
-        <div style="font-family:monospace; font-size:14px;">{colored_text}</div>
+        <div style="font-family:monospace; font-size:14px; word-wrap: break-word; overflow-wrap: break-word; white-space: pre-wrap; max-width: 100%;">{colored_text}</div>
     </div>
     '''

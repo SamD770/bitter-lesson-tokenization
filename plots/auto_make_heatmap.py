@@ -25,17 +25,19 @@ def auto_make_heatmap(checkpoint_directory, render_directory=None, dataset="fine
 
     if dataset == "fineweb":
         _, _, test_set = split_fineweb.get_splits()
+        render_code = False
     elif dataset == "codeparrot":
         _, _, test_set = split_codeparrot.get_splits()
+        render_code = True
     else:
         raise ValueError(f"Unknown dataset: {dataset}.")
 
     model = model.to("cuda", dtype=torch.bfloat16)
 
-    render_and_save_heatmaps(model, test_set, byte_tokenizer, render_directory)
+    render_and_save_heatmaps(model, test_set, byte_tokenizer, render_directory, break_newline=break_newline)
 
 
-def render_and_save_heatmaps(model, test_set, byte_tokenizer, render_directory):
+def render_and_save_heatmaps(model, test_set, byte_tokenizer, render_directory, render_code=True):
     for data_index in [1, 3, 5, 7]:
         tokens, _ = text_to_tensor(test_set[data_index], byte_tokenizer, 4096, "cuda")
         token_list = get_character_list(byte_tokenizer, tokens[0])
@@ -47,7 +49,7 @@ def render_and_save_heatmaps(model, test_set, byte_tokenizer, render_directory):
             os.makedirs(render_directory)
 
         for property in ["probs", "samples"]:
-            html_code = gate_probs_html(token_list, out[f"down_gate_{property}"][0])
+            html_code = gate_probs_html(token_list, out[f"down_gate_{property}"][0], break_newline=break_newline)
             filename = f"{render_directory}/heatmaps_{property}_{data_index}.html"
             with open(filename, "w") as f:
                 f.write(html_code)
