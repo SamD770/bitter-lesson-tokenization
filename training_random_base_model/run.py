@@ -307,8 +307,6 @@ def main():
             # print(f"Saving intermediate renders to {intermediate_render_dir}")
             # render_and_save_heatmaps(model, test_set, byte_tokenizer, intermediate_render_dir)
         
-        accelerator.wait_for_everyone()
-
     accelerator.end_training()
 
     net_scratch_dir = os.path.join("/itet-stor/sdauncey/net_scratch/VScodeProjects/bitter-lesson-tokenization")
