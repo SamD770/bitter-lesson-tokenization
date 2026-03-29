@@ -226,7 +226,8 @@ def main():
     else:
         dataset_string = ""
     
-    run_id = f"{model_name}_{args.run_type}_{dataset_string}{aspect_ratio_string}{seed_string}{time_string}"
+    run_type_str = args.run_type.replace("/", "_")
+    run_id = f"{model_name}_{run_type_str}_{dataset_string}{aspect_ratio_string}{seed_string}{time_string}"
 
     if accelerator.is_main_process:
         print(f"Run ID: {run_id}")
