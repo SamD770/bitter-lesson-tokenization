@@ -572,7 +572,8 @@ def select_next_token_cross_entropy(logits, next_token_ids, next_token_loss_mask
 
 def per_token_losses_backbone(
         batch, loss_mask, out, off_policy_gate_probs,
-        discount_rate = 0.9, learn_gating=True, early_exit_advantage_estimate=True
+        discount_rate = 0.9, learn_gating=True, early_exit_advantage_estimate=True,
+        use_batch_relative_advantages=True,
     ):
     """
     The "backbone" of the loss computations. Computes per-token losses such as the next-token probabilities, the gating loss, the discounted rewards.
@@ -607,7 +608,10 @@ def per_token_losses_backbone(
         # Simple way to normalise rewards: compute the mean over the batch dimension (induction heads could cause dependence on the sequence index).
         mean_rewards = (rewards * next_token_loss_mask).sum(dim=0) / next_token_loss_mask.sum(dim=0) # Mask out the padding tokens as they have zero reward and would skew the mean.
         mean_rewards = mean_rewards.unsqueeze(0)
-        rewards = (rewards - mean_rewards)*next_token_loss_mask
+        if use_batch_relative_advantages:
+            rewards = (rewards - mean_rewards) * next_token_loss_mask
+        else:
+            rewards = rewards * next_token_loss_mask
         discounted_rewards = discounted_rewards_torch(rewards, discount_rate)
 
         # actions: 0 = continue, 1 = gate
@@ -668,9 +672,10 @@ def off_policy_flexible_training_step(
         relative_gating_loss_weight=1., 
         use_off_policy=False, 
         early_output_loss_weight=0.,
-        early_exit_advantage_estimate=False, 
+        early_exit_advantage_estimate=False,
         do_backward_pass=True,
-        rate_consistency_loss="ours"
+        rate_consistency_loss="ours",
+        use_batch_relative_advantages=True,
     ):
     """
     Performs a single training step for the model. 
@@ -704,12 +709,14 @@ def off_policy_flexible_training_step(
 
     with record_function("per_token_losses_backbone"):
         per_token_losses = per_token_losses_backbone(
-            batch, 
-            loss_mask, 
-            out_model, 
-            off_policy_gate_probs, 
-            learn_gating=learn_gating, 
-            early_exit_advantage_estimate=early_exit_advantage_estimate
+            batch,
+            loss_mask,
+            out_model,
+            off_policy_gate_probs,
+            learn_gating=learn_gating,
+            early_exit_advantage_estimate=early_exit_advantage_estimate,
+            discount_rate=discount_rate,
+            use_batch_relative_advantages=use_batch_relative_advantages,
         )
 
     next_token_cross_entropy = per_token_losses["next_token_cross_entropy"]

@@ -70,9 +70,11 @@ def get_run_types() -> List[str]:
     """Get list of available run types from the runs/ config directory."""
     runs_dir = os.path.join(CONFIG_DIR, "runs")
     types = []
-    for filename in os.listdir(runs_dir):
-        if filename.endswith('.json'):
-            types.append(filename[:-5])  # Remove .json extension
+    for root, dirs, files in os.walk(runs_dir):
+        for filename in files:
+            if filename.endswith('.json'):
+                rel_path = os.path.relpath(os.path.join(root, filename), runs_dir)
+                types.append(rel_path[:-5])  # Remove .json extension
     return sorted(types)
 
 

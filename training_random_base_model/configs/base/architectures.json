@@ -52,5 +52,14 @@
       "scale_factor": 0.0625,
       "filter_size": 8
     }
+  },
+  "sequential_filter1": {
+    "GaterClass": "ScaledSequentialyDependentLinearGater",
+    "DownSamplerClass": "SelectTokenDownsampler",
+    "UpsamplerClass": "DistributeAddUpsampler",
+    "gater_kwargs": {
+      "scale_factor": 0.0625,
+      "filter_size": 1
+    }
   }
 }
