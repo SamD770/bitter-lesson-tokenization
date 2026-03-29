@@ -30,3 +30,4 @@ training_random_base_model/renders/*
 *.txt
 *.scratch_clean_remove_empty
 *.parquet
+*.sif
