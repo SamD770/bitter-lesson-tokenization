@@ -1,3 +1,4 @@
+import argparse
 import datasets
 import os
 from tqdm import trange
@@ -17,8 +18,21 @@ n_shards = 1024
 n_documents = 0
 
 if __name__ == "__main__":
-    
-    print("loading dataset...")
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--n_billion_tokens", type=float, default=100.0,
+        help="Approximate number of billion tokens to download (default: 100). "
+             "The 100BT dataset has 1024 shards, so N billion tokens ≈ round(N/100*1024) shards."
+    )
+    args = parser.parse_args()
+
+    n_billion = args.n_billion_tokens
+    n_shards = max(1, min(round(n_billion / 100 * 1024), 1024))
+    n_label = int(n_billion) if n_billion == int(n_billion) else n_billion
+    output_shards_dir = os.path.join(scratch_dir, f"fineweb_{n_label}B_shards")
+    os.makedirs(output_shards_dir, exist_ok=True)
+
+    print(f"downloading ~{n_billion}B tokens ({n_shards}/1024 shards) to {output_shards_dir}...")
     fineweb_100B = datasets.load_dataset(
         "HuggingFaceFW/fineweb",
         "sample-100BT",
@@ -26,12 +40,13 @@ if __name__ == "__main__":
         cache_dir=os.path.join(scratch_dir, "fineweb_100B_cache")
     )
 
-    print("downloading and filtering fineweb 100B...")
+    print("downloading and filtering fineweb...")
+    n_documents = 0
     for shard_idx in range(n_shards):
-        shard_idx_dir = os.path.join(shards_dir, f"shard_{shard_idx}")
+        shard_idx_dir = os.path.join(output_shards_dir, f"shard_{shard_idx}")
         os.makedirs(shard_idx_dir, exist_ok=True)
 
-        fineweb_100B_shard = fineweb_100B.shard(num_shards=n_shards, index=shard_idx)
+        fineweb_100B_shard = fineweb_100B.shard(num_shards=1024, index=shard_idx)
 
         filtered_shard = fineweb_100B_shard.filter(above_min_length)
 
@@ -41,5 +56,5 @@ if __name__ == "__main__":
         print(f"shard {shard_idx} done, {n_documents} documents found")
 
     print(f"found {n_documents/1e6} million documents of length > {min_length} after filtering")
-    print(f"saved {n_shards} shards to {shards_dir}")
+    print(f"saved {n_shards} shards to {output_shards_dir}")
     print("done")
