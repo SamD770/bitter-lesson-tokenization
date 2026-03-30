@@ -1,0 +1,6 @@
+{
+  "comment": "BPE tokenizer prescribed gating. learn_gating must be false so the REINFORCE gating loss does not run.",
+  "learn_gating": false,
+  "prescribed_gating": "bpe",
+  "bpe_tokenizer_path": "bpe_tokenizer/trained_tokenizer"
+}

@@ -263,6 +263,16 @@ def main():
 
     model = AutoregressiveUnet(**model_kwargs).to(device, dtype=torch.bfloat16)
 
+    if training_loop_kwargs.get("prescribed_gating") == "bpe":
+        from bpe_tokenizer.bpe_tokenizer import BPEAutoRegressiveUnet
+        model = BPEAutoRegressiveUnet(
+            model,
+            tokenizer_path=training_loop_kwargs["bpe_tokenizer_path"],
+        )
+    # Strip BPE construction keys — not valid training step kwargs
+    training_loop_kwargs.pop("prescribed_gating", None)
+    training_loop_kwargs.pop("bpe_tokenizer_path", None)
+
     if accelerator.is_main_process:
         print(f"model has {parameter_count_string(model)} parameters")
 
