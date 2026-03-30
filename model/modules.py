@@ -3,6 +3,7 @@ from transformers import AutoTokenizer
 from torch import nn
 from typing import List, Tuple
 
+import math
 import random
 
 from copy import deepcopy
@@ -154,6 +155,27 @@ class LinearGater(nn.Module):
         down_gate_logits = self.linear(x)
         down_gate_probs = F.sigmoid(down_gate_logits)
         return down_gate_logits, down_gate_probs # We need to return the logits for stable backprop
+
+
+class ScaledLinearGater(nn.Module):
+    def __init__(self, embedding_dim: int, downsample_rate: float, scale_factor: float = 1/16.):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.downsample_rate = downsample_rate
+        self.scale_factor = scale_factor
+        self.linear = nn.Linear(embedding_dim, 1)
+
+    def forward(self, x: torch.Tensor, downsample_rate: float = None) -> torch.Tensor:
+        if downsample_rate is None:
+            downsample_rate = self.downsample_rate
+
+        downsample_rate = min(downsample_rate, 0.999)
+        bias = math.log(downsample_rate / (1 - downsample_rate))
+
+        gate_logits = self.linear(x) * self.scale_factor + bias
+        gate_probs = torch.sigmoid(gate_logits)
+        gate_samples = torch.bernoulli(gate_probs)
+        return gate_logits, gate_probs, gate_samples
 
 
 class RandomGater(nn.Module):
