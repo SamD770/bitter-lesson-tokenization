@@ -452,6 +452,7 @@ class AutoregressiveUnet(nn.Module):
             down_gate_logits, down_gate_probs, model_down_gate_samples = self.down_layer_gate(x, downsample_rate=downsample_rate)
 
         if prescribed_down_gate_samples is None:
+            print(f"{prescribed_down_gate_samples=}")
             down_gate_samples = model_down_gate_samples
         elif down_gate_mask is None:
             down_gate_samples = prescribed_down_gate_samples.unsqueeze(-1)
@@ -654,23 +655,24 @@ def in_context_learning_score(next_token_ce, loss_mask, window_size=32, early_in
 
 
 def off_policy_flexible_training_step(
-        model, 
-        optimizer, 
-        batch, 
-        loss_mask, 
-        scheduler=None, 
-        accelerator=None, 
-        learn_gating=True, 
-        downsample_rate_target=0.25, 
-        downsample_rate=None, 
-        consistency_loss_weight=2., 
-        discount_rate = 0.9, 
-        relative_gating_loss_weight=1., 
-        use_off_policy=False, 
+        model,
+        optimizer,
+        batch,
+        loss_mask,
+        scheduler=None,
+        accelerator=None,
+        learn_gating=True,
+        downsample_rate_target=0.25,
+        downsample_rate=None,
+        consistency_loss_weight=2.,
+        discount_rate = 0.9,
+        relative_gating_loss_weight=1.,
+        use_off_policy=False,
         early_output_loss_weight=0.,
-        early_exit_advantage_estimate=False, 
+        early_exit_advantage_estimate=False,
         do_backward_pass=True,
-        rate_consistency_loss="ours"
+        rate_consistency_loss="ours",
+        texts=None,
     ):
     """
     Performs a single training step for the model. 
@@ -693,7 +695,16 @@ def off_policy_flexible_training_step(
         prescribed_down_gate_samples = None
 
     with record_function("forward"):
-        out_model = model(batch, prescribed_down_gate_samples=prescribed_down_gate_samples, downsample_rate=downsample_rate)
+        import time as _time
+        _tu0 = _time.perf_counter()
+        unwrapped = accelerator.unwrap_model(model) if accelerator is not None else model
+        _tu1 = _time.perf_counter()
+        texts_for_model = texts if (not use_off_policy and hasattr(unwrapped, 'bpe_tokenizer')) else None
+        _tu2 = _time.perf_counter()
+        # print(f"[training_step] unwrap={_tu1-_tu0:.3f}s  hasattr={_tu2-_tu1:.4f}s  texts_for_model={'set' if texts_for_model is not None else 'None'}")
+        _tf = _time.perf_counter()
+        out_model = model(batch, prescribed_down_gate_samples=prescribed_down_gate_samples, downsample_rate=downsample_rate, texts=texts_for_model)
+        # print(f"[training_step] forward={_time.perf_counter()-_tf:.3f}s")
     
     on_policy_probs = out_model["down_gate_probs"]
     on_policy_logits = out_model["down_gate_logits"]
@@ -950,18 +961,20 @@ def training_loop(
                     print(f"Validating at step {step_count}")
                     val_metrics = []
                     for val_batch in val_dataloader:
+                        val_texts = val_batch["text"]
                         val_batch, loss_mask = text_to_tensor(val_batch, tokenizer, max_seq_length, device)
                         val_loss_dict = off_policy_flexible_training_step(
-                            model, 
-                            optimizer, 
-                            val_batch, 
-                            loss_mask, 
-                            lr_scheduler, 
-                            accelerator, 
+                            model,
+                            optimizer,
+                            val_batch,
+                            loss_mask,
+                            lr_scheduler,
+                            accelerator,
                             use_off_policy=False,
                             do_backward_pass=False,
                             downsample_rate=val_downsample_rate,
                             downsample_rate_target=val_downsample_rate_target,
+                            texts=val_texts,
                             **training_step_kwargs
                         )
                         val_metrics.append(val_loss_dict)
@@ -987,20 +1000,28 @@ def training_loop(
                 else:
                     use_off_policy = False
 
+                import time as _time
+                _t_texts = _time.perf_counter()
+                texts = batch["text"]
+                _t_text2tensor = _time.perf_counter()
                 batch, loss_mask = text_to_tensor(batch, tokenizer, max_seq_length, device)
+                _t_step_start = _time.perf_counter()
+                # print(f"[training_loop] text extract={_t_text2tensor-_t_texts:.3f}s  text_to_tensor={_t_step_start-_t_text2tensor:.3f}s")
 
                 loss_dict = off_policy_flexible_training_step(
-                    model, 
-                    optimizer, 
-                    batch, 
-                    loss_mask, 
-                    lr_scheduler, 
-                    accelerator, 
+                    model,
+                    optimizer,
+                    batch,
+                    loss_mask,
+                    lr_scheduler,
+                    accelerator,
                     use_off_policy=use_off_policy,
                     downsample_rate=downsample_rate,
                     downsample_rate_target=downsample_rate_target,
+                    texts=texts,
                     **training_step_kwargs
                 )
+                # print(f"[training_loop] off_policy_flexible_training_step={_time.perf_counter()-_t_step_start:.3f}s")
 
                 batch_flops = loss_dict["flops"]
 

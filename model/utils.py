@@ -8,7 +8,8 @@ fp16_gpu_TFLOPS_lookup = {
     "NVIDIA TITAN Xp": 24.8,
     "NVIDIA GeForce RTX 3090": 35.58,
     "NVIDIA RTX A6000": 150, # this is a vibe 
-    "NVIDIA A100 80GB PCIe": 312
+    "NVIDIA A100 80GB PCIe": 312,
+    "NVIDIA H100 80GB HBM3": 2000,
 }
 
 

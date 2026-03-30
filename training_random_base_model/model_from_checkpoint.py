@@ -6,9 +6,14 @@ from safetensors.torch import load_file
 
 
 def load_model(checkpoint_directory):
+    model_state = load_file(os.path.join(checkpoint_directory, "model.safetensors"))
+
+    if any(k.startswith("model.") for k in model_state):
+        from bpe_tokenizer.bpe_tokenizer import BPEAutoRegressiveUnet
+        return BPEAutoRegressiveUnet.from_checkpoint(checkpoint_directory)
+
     model_config = load_model_config_from_file(os.path.join(checkpoint_directory, "model_config.json"))
     model = AutoregressiveUnet(**model_config)
-    model_state = load_file(os.path.join(checkpoint_directory, "model.safetensors"))
     missing, unexpected = model.load_state_dict(model_state, strict=False)
 
     if len(missing) > 0 or len(unexpected) > 0:

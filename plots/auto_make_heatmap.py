@@ -25,10 +25,10 @@ def auto_make_heatmap(checkpoint_directory, render_directory=None, dataset="fine
 
     if dataset == "fineweb":
         _, _, test_set = split_fineweb.get_splits()
-        render_code = False
+        break_newline = False
     elif dataset == "codeparrot":
         _, _, test_set = split_codeparrot.get_splits()
-        render_code = True
+        break_newline = True
     else:
         raise ValueError(f"Unknown dataset: {dataset}.")
 
@@ -37,13 +37,15 @@ def auto_make_heatmap(checkpoint_directory, render_directory=None, dataset="fine
     render_and_save_heatmaps(model, test_set, byte_tokenizer, render_directory, break_newline=break_newline)
 
 
-def render_and_save_heatmaps(model, test_set, byte_tokenizer, render_directory, render_code=True):
+def render_and_save_heatmaps(model, test_set, byte_tokenizer, render_directory, break_newline=False):
     for data_index in [1, 3, 5, 7]:
+        text = test_set[data_index]["text"]
         tokens, _ = text_to_tensor(test_set[data_index], byte_tokenizer, 4096, "cuda")
         token_list = get_character_list(byte_tokenizer, tokens[0])
 
         with torch.no_grad():
-            out = model(tokens)
+            texts_arg = [text] if hasattr(model, "bpe_tokenizer") else None
+            out = model(tokens, texts=texts_arg) if texts_arg else model(tokens)
 
         if not os.path.exists(render_directory):
             os.makedirs(render_directory)

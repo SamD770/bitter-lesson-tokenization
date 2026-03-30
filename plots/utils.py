@@ -80,7 +80,7 @@ def get_character_list(tokenizer, token_ids):
 
 
 # Helper function: plot where the model puts high probability gates.
-def gate_probs_html(txt, gate_probs, render_code=True):
+def gate_probs_html(txt, gate_probs, break_newline=True):
     
     # Ensure gate_probs and input_text have the same length
     gate_probs = gate_probs[:len(txt)]

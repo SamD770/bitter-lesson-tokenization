@@ -43,6 +43,7 @@ if __name__ == "__main__":
 
     print(f"{train_set[0]['text'][:200]=}")
     print(f"{val_set[0]['text'][:200]=}")
+    print(f"{test_set[0]['text'][:200]=}")
 
     train_dl = DataLoader(train_set, batch_size=16, num_workers=4, pin_memory=True)
     val_dl = DataLoader(val_set, batch_size=16, num_workers=4, pin_memory=True)
