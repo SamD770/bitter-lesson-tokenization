@@ -5,6 +5,7 @@ This allows JSON configs to reference classes by string names.
 
 from model.modules import (
     LinearGater,
+    ScaledLinearGater,
     RandomGater,
     EquidistantGater,
     ExactRandomGater,
@@ -26,6 +27,7 @@ from model.conditional_sequential import (
 
 GATER_REGISTRY = {
     "LinearGater": LinearGater,
+    "ScaledLinearGater": ScaledLinearGater,
     "RandomGater": RandomGater,
     "EquidistantGater": EquidistantGater,
     "ExactRandomGater": ExactRandomGater,
