@@ -28,6 +28,7 @@ class ByteLevelLMWrapper(LM):
         batch_size: int = 1,
         max_length: int = 4096,
         device: Optional[str] = None,
+        length_normalize: bool = False,
     ):
         """
         Initialize the wrapper.
@@ -45,6 +46,8 @@ class ByteLevelLMWrapper(LM):
         self._batch_size = batch_size
         self._max_length = max_length
         
+        self._length_normalize = length_normalize
+
         if device is None:
             # Try to infer device from model parameters
             try:
@@ -170,22 +173,27 @@ class ByteLevelLMWrapper(LM):
             # So for continuation starting at context_len, we look at logits[context_len-1:]
             log_likelihood = 0.0
             is_greedy = True
-            
+            num_tokens = 0
+
             for j, cont_token in enumerate(continuation_ids):
                 # Position in the full sequence where we predict this token
                 pos = context_len - 1 + j
-                
+
                 if pos >= logits.shape[1]:
                     break
-                
+
                 # Get log-prob for the actual continuation token
                 token_logprob = logits[0, pos, cont_token].item()
                 log_likelihood += token_logprob
-                
+                num_tokens += 1
+
                 # Check if this was the greedy choice
                 if logits[0, pos].argmax().item() != cont_token:
                     is_greedy = False
-            
+
+            if self._length_normalize and num_tokens > 0:
+                log_likelihood /= num_tokens
+
             results.append((log_likelihood, is_greedy))
         
         return results

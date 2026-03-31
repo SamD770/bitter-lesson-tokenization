@@ -19,6 +19,7 @@ def evaluate_multiple(
     device: Optional[str] = None,
     num_fewshot: int = 0,
     limit: Optional[int] = None,
+    length_normalize: bool = False,
 ) -> Dict[str, Any]:
     """
     Evaluate a byte-level model on multiple benchmarks.
@@ -42,6 +43,7 @@ def evaluate_multiple(
         tokenizer=byte_tokenizer,
         batch_size=batch_size,
         device=device,
+        length_normalize=length_normalize,
     )
     
     results = evaluator.simple_evaluate(
@@ -66,6 +68,7 @@ if __name__ == "__main__":
     parser.add_argument("--limit", type=int, default=None, help="Limit number of examples")
     parser.add_argument("--num-fewshot", type=int, default=0, help="Number of few-shot examples")
     parser.add_argument("--tasks", nargs="+", default=["arc_easy", "piqa", "hellaswag", "lambada_openai"], help="Tasks to evaluate")
+    parser.add_argument("--length-normalize", action="store_true", help="Normalize log-likelihood by continuation length")
     
     args = parser.parse_args()
     
@@ -85,6 +88,7 @@ if __name__ == "__main__":
             batch_size=args.batch_size,
             limit=args.limit,
             num_fewshot=args.num_fewshot,
+            length_normalize=args.length_normalize,
         )
 
     
