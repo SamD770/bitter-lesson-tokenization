@@ -97,15 +97,20 @@ class ByteLevelLMWrapper(LM):
     def _model_call(self, input_ids: torch.Tensor) -> torch.Tensor:
         """
         Run the model and return log-probabilities.
-        
+
         Args:
             input_ids: Input token IDs of shape [batch, seq_len]
-            
+
         Returns:
             Log-probabilities of shape [batch, seq_len, vocab_size]
         """
         with torch.no_grad():
-            out = self._model(input_ids)
+            from bpe_tokenizer.bpe_tokenizer import BPEAutoRegressiveUnet
+            if isinstance(self._model, BPEAutoRegressiveUnet):
+                texts = self._tokenizer.batch_decode(input_ids, skip_special_tokens=True)
+                out = self._model(input_ids, texts=texts)
+            else:
+                out = self._model(input_ids)
             # The model returns log-softmax logits
             return out["logits"]
     

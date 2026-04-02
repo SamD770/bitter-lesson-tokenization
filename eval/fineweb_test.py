@@ -113,7 +113,11 @@ def evaluate_fineweb_bpb(
         
         # Get model log-probabilities
         with torch.no_grad():
-            out = model(input_ids)
+            from bpe_tokenizer.bpe_tokenizer import BPEAutoRegressiveUnet
+            if isinstance(model, BPEAutoRegressiveUnet):
+                out = model(input_ids, texts=truncated_texts)
+            else:
+                out = model(input_ids)
             logits = out["logits"]  # [batch, seq_len, vocab_size]
         
         # Compute log-likelihood for each document in the batch
