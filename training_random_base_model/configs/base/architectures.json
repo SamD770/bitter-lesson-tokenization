@@ -61,5 +61,13 @@
       "scale_factor": 0.0625,
       "filter_size": 1
     }
+  },
+  "scaled_linear": {
+    "GaterClass": "ScaledLinearGater",
+    "DownSamplerClass": "SelectTokenDownsampler",
+    "UpsamplerClass": "DistributeAddUpsampler",
+    "gater_kwargs": {
+      "scale_factor": 0.0625
+    }
   }
 }
