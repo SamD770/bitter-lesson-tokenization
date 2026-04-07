@@ -1,0 +1,9 @@
+{
+  "learn_gating": true,
+  "discount_rate": 0.99,
+  "early_exit_advantage_estimate": true,
+  "relative_gating_loss_weight": 0.01,
+  "consistency_loss_weight": 0.01,
+  "early_output_loss_weight": 0.01,
+  "step_print_every": 10
+}
