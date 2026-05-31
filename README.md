@@ -140,7 +140,7 @@ bash eval/run_all_evals.sh <checkpoint_dir>
 - **Downsampler** merges bytes into tokens: `SelectTokenDownsampler`, `AverageTokenDownsampler`, `NawrotDownsampler`, `HNetDownsampler`.
 - **Upsampler** reconstructs byte-level features: `DistributeAddUpsampler`, `DistributeDeviationUpsampler`, `NawrotUpsampler`, `HNetUpsampler`.
 - Gating is non-differentiable by nature; gradients flow via straight-through / score-function estimators (see `off_policy_flexible_training_step()` in [model/model.py](model/model.py)).
-- The downsampling rate is annealed during training by `DefaultDownsampleRateScheduler` ([model/downsample_rate_scheduler.py](model/downsample_rate_scheduler.py)).
+- The downsampling rate can be annealed during training by `DefaultDownsampleRateScheduler` ([model/downsample_rate_scheduler.py](model/downsample_rate_scheduler.py)). See `flexify_training/` for experiments (didn't make it into paper).
 - Configs are layered JSON files merged at runtime by [training_random_base_model/config_loader.py](training_random_base_model/config_loader.py); string class names are resolved via [training_random_base_model/class_registry.py](training_random_base_model/class_registry.py).
 
 ## License
