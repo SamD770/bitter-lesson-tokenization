@@ -42,6 +42,57 @@ so the repo runs out-of-the-box:
 | `PROJECT_DIR`  | Project root (for saving data/checkpoints) | current working directory            |
 | `WANDB_ENTITY` | W&B entity for logging (optional)          | unset (W&B uses your default entity) |
 
+## Running with Apptainer / Singularity
+
+For HPC clusters we run inside an [Apptainer](https://apptainer.org/) (formerly
+Singularity) container. The image is defined by
+[`pytorch_flashattn_container.def`](pytorch_flashattn_container.def), which is
+built on `pytorch/pytorch:2.7.0-cuda12.6-cudnn9-devel` and bakes in
+`flash-attn`, `mamba-ssm`, `transformers`, and `datasets`.
+
+Build the image (needs root or `--fakeroot`):
+
+```bash
+apptainer build pytorch_flashattn_container.sif pytorch_flashattn_container.def
+```
+
+Then run any command inside it, binding your scratch space so datasets and
+checkpoints persist:
+
+```bash
+apptainer exec --nv \
+    --bind "${SCRATCH_DIR}:${SCRATCH_DIR}" \
+    pytorch_flashattn_container.sif \
+    python -m training_random_base_model.run --size 18M --architecture random --batch_size 32
+```
+
+`--nv` exposes the host GPUs. The example SLURM script
+`training_random_base_model/73M_job.sh` shows how to wrap a distributed launch
+in `apptainer exec`.
+
+## Data preprocessing
+
+See [data_processing/dataset_README.md](data_processing/dataset_README.md) for
+full details. Datasets are written under `$SCRATCH_DIR` (see the table above).
+
+**FineWeb** (the 100B-token subset, filtered to sequences of >4096 UTF-8 bytes).
+Download + per-shard filter, then aggregate the shards into a single dataset:
+
+```bash
+# Download & filter (~6h for the full 100B; use --n_billion_tokens for a subset)
+python -m data_processing.download_and_filter_fineweb_100B --n_billion_tokens 100
+
+# Aggregate the 1024 filtered shards into one dataset (~15 min)
+python -m data_processing.aggregate_fineweb_shards
+```
+
+**CodeParrot** (streamed, filtered, sharded, then aggregated):
+
+```bash
+python -m data_processing.stream_and_filter_codeparrot
+python -m data_processing.aggregate_codeparrot_shards
+```
+
 ## Training
 
 ```bash

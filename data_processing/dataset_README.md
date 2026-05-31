@@ -1,5 +1,5 @@
 
-We use the $100B$ subset of [FineWeb](https://huggingface.co/datasets/HuggingFaceFW/fineweb), filtered for sequences of $>4096$ utf-8 bytes. To download the dataset, split it into $1024$ shards, filter each shard and save, set the `scratch_dir` variable in `data_processing/download_and_filter_fineweb_100B.py` to indicate where you want to save the dataset to and run:
+We use the $100B$ subset of [FineWeb](https://huggingface.co/datasets/HuggingFaceFW/fineweb), filtered for sequences of $>4096$ utf-8 bytes. To download the dataset, split it into $1024$ shards, filter each shard and save, set the `SCRATCH_DIR` environment variable to indicate where you want to save the dataset to and run:
 
 ```bash
 python -m data_processing.download_and_filter_fineweb_100B
