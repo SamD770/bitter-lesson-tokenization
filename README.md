@@ -1,4 +1,4 @@
-# Bitter-Lesson Tokenization
+# You Can Learn Tokenization End-to-End with Reinforcement Learning
 
 A research framework for **dynamic tokenization** — learning to compress
 variable-length byte sequences into variable-length token sequences *during*
@@ -92,3 +92,16 @@ bash eval/run_all_evals.sh <checkpoint_dir>
 ## License
 
 [MIT](LICENSE)
+
+## BibTeX
+
+```bibtex
+@inproceedings{
+    dauncey2026tokenizationrl,
+    title={You Can Learn Tokenization End-to-End with Reinforcement Learning},
+    author={Sam Dauncey and Roger Wattenhofer},
+    booktitle={Forty-third International Conference on Machine Learning},
+    year={2026},
+    url={https://openreview.net/forum?id=0rXBwsTWDB}
+}
+```
