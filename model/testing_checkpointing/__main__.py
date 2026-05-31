@@ -13,8 +13,8 @@ from training_random_base_model.hparam_utils import get_model_kwargs
 from clean_code.flexible_bitter_llm import FlexibleBitterLLM, flexible_training_loop_warm_start_accelerate
 from clean_code.flexible_bitter_llm import save_checkpoint, load_checkpoint, BatchLimitCondition
 
-username = "sdauncey"
-scratch_dir = f"/scratch/{username}/tokenizer_training"
+username = os.environ.get("USER", "user")
+scratch_dir = os.environ.get("SCRATCH_DIR", f"/tmp/{username}/tokenizer_training")
 output_dir = "clean_code/testing_checkpointing/"
 
 # Run with two accelerators.
@@ -83,7 +83,7 @@ def train_checkpoint(run_name, n_effective_batches):
         init_kwargs={
             "wandb": {
                 "config": config,
-                "entity": "samdauncey-eth-z-rich",
+                "entity": os.environ.get("WANDB_ENTITY"),
         }},
     )
     

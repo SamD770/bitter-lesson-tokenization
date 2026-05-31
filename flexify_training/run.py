@@ -225,8 +225,8 @@ def main():
     args = parser.parse_args()
 
 
-    username = "sdauncey"
-    scratch_dir = f"/scratch/{username}/tokenizer_training"
+    username = os.environ.get("USER", "user")
+    scratch_dir = os.environ.get("SCRATCH_DIR", f"/tmp/{username}/tokenizer_training")
     # scratch_dir = "/workspace"
     logging_dir = os.path.join(scratch_dir, "wandb_logs")
 
@@ -273,7 +273,7 @@ def main():
         init_kwargs={
             "wandb": {
                 "config": to_wandb_config(config),
-                "entity": "samdauncey-eth-z-rich",
+                "entity": os.environ.get("WANDB_ENTITY"),
                 "id": run_id
         }},
     )
@@ -314,7 +314,7 @@ def main():
 
     accelerator.end_training()
 
-    net_scratch_dir = os.path.join("/itet-stor/sdauncey/net_scratch/VScodeProjects/bitter-lesson-tokenization")
+    net_scratch_dir = os.environ.get("PROJECT_DIR", os.getcwd())
     checkpoint_dir = os.path.join(net_scratch_dir, "flexify_training", "checkpoints", run_id)
 
     if accelerator.is_main_process: 

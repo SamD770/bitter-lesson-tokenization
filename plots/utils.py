@@ -18,7 +18,7 @@ def load_runs_from_wandb(run_names):
 
 
         if not os.path.exists(parquet_path):
-            my_run = api.run(f"samdauncey-eth-z-rich/training_random_base_model/runs/{run_name}")
+            my_run = api.run(f"{os.environ.get('WANDB_ENTITY')}/training_random_base_model/runs/{run_name}")
 
             history = my_run.scan_history()
             df = pd.DataFrame(history)

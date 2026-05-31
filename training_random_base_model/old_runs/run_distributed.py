@@ -25,8 +25,8 @@ import wandb
 
 def main():
 
-    username = "sdauncey"
-    scratch_dir = f"/scratch/{username}/tokenizer_training"
+    username = os.environ.get("USER", "user")
+    scratch_dir = os.environ.get("SCRATCH_DIR", f"/tmp/{username}/tokenizer_training")
     logging_dir = os.path.join(scratch_dir, "wandb_logs")
 
     project_config = ProjectConfiguration(
@@ -142,7 +142,7 @@ def main():
 
     accelerator.end_training()
 
-    net_scratch_dir = os.path.join("/itet-stor/sdauncey/net_scratch/VScodeProjects/bitter-lesson-tokenization")
+    net_scratch_dir = os.environ.get("PROJECT_DIR", os.getcwd())
     checkpoint_dir = os.path.join(net_scratch_dir, "training_random_base_model", "checkpoints")
 
     if accelerator.is_main_process: 

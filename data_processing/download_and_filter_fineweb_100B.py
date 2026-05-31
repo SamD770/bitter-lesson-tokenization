@@ -3,8 +3,8 @@ import datasets
 import os
 from tqdm import trange
 
-username = "sdauncey"
-scratch_dir = f"/scratch/{username}/tokenizer_training"
+username = os.environ.get("USER", "user")
+scratch_dir = os.environ.get("SCRATCH_DIR", f"/tmp/{username}/tokenizer_training")
 
 shards_dir = os.path.join(scratch_dir, "fineweb_100B_shards")
 os.makedirs(shards_dir, exist_ok=True)

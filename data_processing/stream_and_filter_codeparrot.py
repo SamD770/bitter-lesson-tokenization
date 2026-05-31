@@ -9,8 +9,8 @@ total_num_utf8_bytes = 20e9  # 20GB
 
 min_num_bytes = 4096
 
-username = "sdauncey"
-scratch_dir = f"/scratch/{username}/tokenizer_training"
+username = os.environ.get("USER", "user")
+scratch_dir = os.environ.get("SCRATCH_DIR", f"/tmp/{username}/tokenizer_training")
 cache_dir = os.path.join(scratch_dir, "codeparrot_cache")
 output_dir = os.path.join(scratch_dir, "codeparrot_filtered")
 

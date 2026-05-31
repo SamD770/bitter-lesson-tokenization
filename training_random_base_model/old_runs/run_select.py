@@ -18,8 +18,8 @@ if __name__ == "__main__":
     
     byte5_tokenizer = AutoTokenizer.from_pretrained("google/byt5-large")
 
-    username = "sdauncey"
-    scratch_dir = f"/scratch/{username}/tokenizer_training"
+    username = os.environ.get("USER", "user")
+    scratch_dir = os.environ.get("SCRATCH_DIR", f"/tmp/{username}/tokenizer_training")
 
     if not os.path.exists(scratch_dir):
         os.makedirs(scratch_dir)
@@ -71,7 +71,7 @@ if __name__ == "__main__":
         learn_gating=False
     )
 
-    net_scratch_dir = os.path.join("/itet-stor/sdauncey/net_scratch/VScodeProjects/bitter-lesson-tokenization")
+    net_scratch_dir = os.environ.get("PROJECT_DIR", os.getcwd())
 
     # Save the train losses to the specified directory
     train_losses_file = os.path.join(net_scratch_dir, f"training_random_base_model/random_select_base_model_{args.seed}.csv")

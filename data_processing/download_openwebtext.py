@@ -4,8 +4,8 @@ import datasets
 if __name__ == "__main__":
     import os
 
-    username = "sdauncey"
-    scratch_dir = f"/scratch/{username}/tokenizer_training"
+    username = os.environ.get("USER", "user")
+    scratch_dir = os.environ.get("SCRATCH_DIR", f"/tmp/{username}/tokenizer_training")
 
     if not os.path.exists(scratch_dir):
         os.makedirs(scratch_dir)

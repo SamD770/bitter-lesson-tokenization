@@ -2,8 +2,8 @@ import datasets
 import os
 from pathlib import Path
 
-username = "sdauncey"
-scratch_dir = f"/scratch/{username}/tokenizer_training"
+username = os.environ.get("USER", "user")
+scratch_dir = os.environ.get("SCRATCH_DIR", f"/tmp/{username}/tokenizer_training")
 
 print("loading dataset...")
 openwebtext_full = datasets.load_dataset(
@@ -31,7 +31,7 @@ filtered_dataset = openwebtext_full.filter(lambda example: len(example["text"].e
 
 # Save the filtered dataset to the net_scratch directory
 print("saving filtered dataset...")
-net_scratch_dir = Path("/itet-stor/sdauncey/net_scratch/VScodeProjects/bitter-lesson-tokenization/")
+net_scratch_dir = Path(os.environ.get("PROJECT_DIR", os.getcwd()))
 data_dir = os.path.join(net_scratch_dir, "data")
 filtered_dataset.save_to_disk(os.path.join(data_dir, "openwebtext_full_filtered"))
 

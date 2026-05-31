@@ -91,7 +91,7 @@ if __name__ == "__main__":
     dtype = torch.float16
     byte5_tokenizer = AutoTokenizer.from_pretrained("google/byt5-large")
 
-    net_scratch_dir = os.path.join("/itet-stor/sdauncey/net_scratch/VScodeProjects/bitter-lesson-tokenization")
+    net_scratch_dir = os.environ.get("PROJECT_DIR", os.getcwd())
 
     saved_model_file_name = f"training_random_base_model/random_select_early_output_base_model_42.pt"
     my_model = torch.load(os.path.join(net_scratch_dir, saved_model_file_name), weights_only=False).to(device)

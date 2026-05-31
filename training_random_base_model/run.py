@@ -163,8 +163,8 @@ def main():
     if args.aspect_ratio:
         assert args.aspect_ratio in [1, 2, 3, 4, 5, 6, 7, 8], "Aspect ratio must be one of 1, 2, 3, 4, 5, 6, 7, 8"
 
-    username = "sdauncey"
-    scratch_dir = f"/scratch/{username}/tokenizer_training"
+    username = os.environ.get("USER", "user")
+    scratch_dir = os.environ.get("SCRATCH_DIR", f"/tmp/{username}/tokenizer_training")
     logging_dir = os.path.join(scratch_dir, "wandb_logs")
 
     byte_tokenizer = AutoTokenizer.from_pretrained("evabyte/EvaByte", trust_remote_code=True)
@@ -245,7 +245,7 @@ def main():
         init_kwargs={
             "wandb": {
                 "config": wandb_config,
-                "entity": "samdauncey-eth-z-rich",
+                "entity": os.environ.get("WANDB_ENTITY"),
                 "id": run_id
         }},
     )
@@ -310,7 +310,7 @@ def main():
         
     accelerator.end_training()
 
-    net_scratch_dir = os.path.join("/itet-stor/sdauncey/net_scratch/VScodeProjects/bitter-lesson-tokenization")
+    net_scratch_dir = os.environ.get("PROJECT_DIR", os.getcwd())
     final_checkpoint_dir = os.path.join(net_scratch_dir, "training_random_base_model", "checkpoints", run_id)
 
     if accelerator.is_main_process: 

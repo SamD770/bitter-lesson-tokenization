@@ -1,0 +1,94 @@
+# Bitter-Lesson Tokenization
+
+A research framework for **dynamic tokenization** — learning to compress
+variable-length byte sequences into variable-length token sequences *during*
+training, rather than relying on a fixed, pre-trained tokenizer.
+
+The core model is an autoregressive U-Net over bytes. Each forward pass runs a
+**Gater → Downsampler → Mid-layers → Upsampler** pipeline that learns where to
+place token boundaries instead of having them imposed by a BPE vocabulary.
+
+```text
+Bytes → down_layers → Gater → Downsampler → mid_layers → Upsampler → up_layers → predictions
+```
+
+## Installation
+
+Requires Python 3.11+. Dependencies are managed with [uv](https://docs.astral.sh/uv/).
+
+```bash
+uv sync          # or: pip install -e .
+```
+
+Copy `.env.template` to `.env` and fill in your credentials:
+
+```bash
+cp .env.template .env
+# WANDB_API_KEY=...   (optional, for Weights & Biases logging)
+# HF_TOKEN=...        (for gated/large HuggingFace datasets)
+```
+
+### Environment variables
+
+Scripts read a few paths from the environment, falling back to local defaults
+so the repo runs out-of-the-box:
+
+| Variable       | Purpose                                    | Default                              |
+| -------------- | ------------------------------------------ | ------------------------------------ |
+| `SCRATCH_DIR`  | Dataset cache / scratch space              | `/tmp/$USER/tokenizer_training`      |
+| `PROJECT_DIR`  | Project root (for saving data/checkpoints) | current working directory            |
+| `WANDB_ENTITY` | W&B entity for logging (optional)          | unset (W&B uses your default entity) |
+
+## Training
+
+```bash
+# Single command (uses 🤗 accelerate under the hood for multi-GPU/multi-node)
+python -m training_random_base_model.run --size 18M --architecture random --batch_size 32
+
+# Nawrot-style dynamic pooling baseline
+python -m training_random_base_model.run_nawrot --size 18M --batch_size 32
+
+# Resume from a checkpoint
+python -m training_random_base_model.run --size 18M --architecture hnet --run_type hnet --resume_checkpoint <dir>
+```
+
+Example launch wrappers live in `training_random_base_model/`
+(`launch_distributed.sh`, `73M_job.sh` as a SLURM template).
+
+**CLI args:**
+
+- `--size`: `18M | 32M | 73M | 130M | 346M`
+- `--architecture`: `random | linear | sequential | nawrot | hnet`
+- `--run_type`: `default | random | nawrot | hnet | linear | sequential`
+- `--dataset`: `fineweb | codeparrot`
+- `--aspect_ratio`: `1–8` (controls sequence length)
+
+## Evaluation
+
+```bash
+bash eval/run_all_evals.sh <checkpoint_dir>
+```
+
+## Repository layout
+
+| Path                          | Contents                                                              |
+| ----------------------------- | --------------------------------------------------------------------- |
+| `model/`                      | `AutoregressiveUnet`, Gater/Downsampler/Upsampler modules, plugins    |
+| `training_random_base_model/` | Training loop, layered JSON config system, launch scripts             |
+| `data_processing/`            | FineWeb / OpenWebText / CodeParrot download & filtering               |
+| `eval/`                       | BPB tables, LAMBADA/PIQA, evaluation harness                          |
+| `flexify_training/`           | Aspect-ratio / flexible-sequence-length training experiments          |
+| `plots/`, `optimizing_code/`  | Analysis notebooks and profiling experiments                          |
+
+## Architecture notes
+
+- **Gater** ([model/modules.py](model/modules.py)) produces gate logits/probs/samples per byte, deciding token boundaries. Variants: `LinearGater`, `RandomGater`, `EquidistantGater`, `ExactRandomGater`, `NawrotGater`, `HNetGater`.
+- **Downsampler** merges bytes into tokens: `SelectTokenDownsampler`, `AverageTokenDownsampler`, `NawrotDownsampler`, `HNetDownsampler`.
+- **Upsampler** reconstructs byte-level features: `DistributeAddUpsampler`, `DistributeDeviationUpsampler`, `NawrotUpsampler`, `HNetUpsampler`.
+- Gating is non-differentiable by nature; gradients flow via straight-through / score-function estimators (see `off_policy_flexible_training_step()` in [model/model.py](model/model.py)).
+- The downsampling rate is annealed during training by `DefaultDownsampleRateScheduler` ([model/downsample_rate_scheduler.py](model/downsample_rate_scheduler.py)).
+- Configs are layered JSON files merged at runtime by [training_random_base_model/config_loader.py](training_random_base_model/config_loader.py); string class names are resolved via [training_random_base_model/class_registry.py](training_random_base_model/class_registry.py).
+
+## License
+
+[MIT](LICENSE)

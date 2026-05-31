@@ -1,4 +1,5 @@
 from accelerate import Accelerator
+import os
 import random
 from math import log
 from datetime import datetime
@@ -18,7 +19,7 @@ def main():
         init_kwargs={
             "wandb": {
                 "config": config,
-                "entity": "samdauncey-eth-z-rich",
+                "entity": os.environ.get("WANDB_ENTITY"),
                 "id": f"test_run_id_{datetime.now().strftime('%Y_%m%d_%H%M')}"
             }
         },

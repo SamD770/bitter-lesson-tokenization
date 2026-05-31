@@ -703,8 +703,8 @@ if __name__ == "__main__":
 
     os.environ["OMP_NUM_THREADS"] = "2"
 
-    username = "sdauncey"
-    scratch_dir = f"/scratch/{username}/tokenizer_training"
+    username = os.environ.get("USER", "user")
+    scratch_dir = os.environ.get("SCRATCH_DIR", f"/tmp/{username}/tokenizer_training")
 
     if not os.path.exists(scratch_dir):
         os.makedirs(scratch_dir)
@@ -746,7 +746,7 @@ if __name__ == "__main__":
     train_losses = bitter_tokenizer_training_loop_distributed(model, openwebtext_25p, num_epochs=1, batch_size=32, batch_print_every=10, batch_limit=10*10**3, local_rank=local_rank)
 
     model_file_name = "bitter-llm-exp9.pt"
-    net_scratch_dir = os.path.join("/itet-stor/sdauncey/net_scratch/VScodeProjects/bitter-lesson-tokenization")
+    net_scratch_dir = os.environ.get("PROJECT_DIR", os.getcwd())
 
     if local_rank == 0:
         # Save the model to the specified directory

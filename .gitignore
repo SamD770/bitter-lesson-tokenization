@@ -1,8 +1,23 @@
-__pycache__/experiment_1.cpython-312.pyc
+__pycache__/
+*.pyc
+.venv/
+venv/
 /old_experiments/
 data/*
 plots/renders/*
 training_random_base_model/renders/*
+
+# environments & secrets
+.env
+!.env.template
+
+# wandb run logs
+wandb/
+*/wandb/
+
+# profiling / job artifacts
+*.prof
+gmon.out
 
 *.pt
 *.bin

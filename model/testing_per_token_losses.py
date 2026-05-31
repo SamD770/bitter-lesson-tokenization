@@ -1,3 +1,4 @@
+import os
 from .flexible_bitter_llm import per_token_losses_backbone
 
 import torch
@@ -88,7 +89,7 @@ for k, v in per_token_losses.items():
 
 
 
-# my_path = "/itet-stor/sdauncey/net_scratch/VScodeProjects/bitter-lesson-tokenization/test_openwebtext_samples.pkl"
+# my_path = os.path.join(os.environ.get("PROJECT_DIR", os.getcwd()), "test_openwebtext_samples.pkl")
 
 # with open(my_path, 'rb') as f:
 #     my_samples = pickle.load(f)
