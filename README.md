@@ -1,8 +1,11 @@
 # You Can Learn Tokenization End-to-End with Reinforcement Learning
 
-A research framework for **dynamic tokenization** — learning to compress
+This is the codebase used for our ICML 2026 paper [You Can Learn Tokenization End-to-End with Reinforcement Learning](https://openreview.net/forum?id=0rXBwsTWDB))
+
+The code is a research framework for **dynamic tokenization** — learning to compress
 variable-length byte sequences into variable-length token sequences *during*
 training, rather than relying on a fixed, pre-trained tokenizer.
+It directly plugs into the code for straight-throug estimators such as [HNet](https://openreview.net/forum?id=ZbfLR9NbNF) and [Dynamic Token Pooling](https://aclanthology.org/2023.acl-long.353/). 
 
 The core model is an autoregressive U-Net over bytes. Each forward pass runs a
 **Gater → Downsampler → Mid-layers → Upsampler** pipeline that learns where to
